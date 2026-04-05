@@ -199,7 +199,9 @@ sub vcard_to_jscontact {
   $card->{uid} = _first_value($props, 'uid') // _generate_uid();
 
   # Simple scalar properties
-  _set_if($card, 'kind',     _first_value($props, 'kind'), sub { lc $_[0] });
+  _set_if($card, 'kind',     _first_value($props, 'kind')
+                              // _first_value($props, 'x-addressbookserver-kind'),
+                              sub { lc $_[0] });
   _set_if($card, 'prodId',   _first_value($props, 'prodid'));
   _set_if($card, 'updated',  _first_value($props, 'rev'), \&_to_utc_datetime);
   _set_if($card, 'created',  _first_value($props, 'created'), \&_to_utc_datetime);
@@ -282,6 +284,18 @@ sub _convert_name {
       }
       $name->{sortAs} = \%sort_map if %sort_map;
     }
+  }
+
+  # Apple X-PHONETIC-*-NAME -> phonetic name components
+  my $phonFirst = _first_value($props, 'x-phonetic-first-name');
+  my $phonLast  = _first_value($props, 'x-phonetic-last-name');
+  my $phonMid   = _first_value($props, 'x-phonetic-middle-name');
+  if ($phonFirst || $phonLast || $phonMid) {
+    my @phon;
+    push @phon, { '@type' => 'NameComponent', kind => 'given',   value => _decode_value($phonFirst), phonetic => 'ipa' } if $phonFirst;
+    push @phon, { '@type' => 'NameComponent', kind => 'given2',  value => _decode_value($phonMid),   phonetic => 'ipa' } if $phonMid;
+    push @phon, { '@type' => 'NameComponent', kind => 'surname', value => _decode_value($phonLast),  phonetic => 'ipa' } if $phonLast;
+    $name->{phoneticComponents} = \@phon;
   }
 
   $card->{name} = $name if %$name;
@@ -428,6 +442,15 @@ sub _convert_addresses {
     $obj->{timeZone} = $tz if defined $tz;
 
     my $cc = _param($item, 'cc');
+    # Apple X-ABADR grouped with ADR
+    if (!$cc && $item->{group}) {
+      for my $xabadr (@{$props->{'x-abadr'} // []}) {
+        if (($xabadr->{group} // '') eq $item->{group}) {
+          $cc = $xabadr->{value};
+          last;
+        }
+      }
+    }
     $obj->{countryCode} = $cc if defined $cc;
 
     my @types = _params_list($item, 'type');
@@ -509,9 +532,10 @@ sub _convert_titles {
   $card->{titles} = \%map if %map;
 }
 
-# BDAY, ANNIVERSARY, DEATHDATE -> anniversaries
+# BDAY, ANNIVERSARY, DEATHDATE, X-ABDATE -> anniversaries
 sub _convert_anniversaries {
   my ($card, $props, $new_id) = @_;
+  my $labels = _collect_labels($props);
 
   my %map;
   for my $spec (['bday', 'birth'], ['anniversary', 'wedding'], ['deathdate', 'death']) {
@@ -526,6 +550,30 @@ sub _convert_anniversaries {
         date  => _convert_vcard_date($val),
       };
     }
+  }
+
+  # Apple X-ABDATE + X-ABLabel -> anniversaries
+  for my $item (@{$props->{'x-abdate'} // []}) {
+    my $val = $item->{value};
+    next unless defined $val && $val ne '';
+    my $id = _prop_id($item, $new_id);
+
+    my $kind = 'other';
+    if (my $group = $item->{group}) {
+      my $label = $labels->{$group};
+      if ($label) {
+        my $lt = lc $label;
+        if ($lt eq 'anniversary') { $kind = 'wedding' }
+        elsif ($lt eq 'other') { $kind = 'other' }
+        else { $kind = $lt }
+      }
+    }
+
+    $map{$id} = {
+      '@type' => 'Anniversary',
+      kind  => $kind,
+      date  => _convert_vcard_date($val),
+    };
   }
 
   $card->{anniversaries} = \%map if %map;
@@ -609,6 +657,32 @@ sub _convert_online_services {
       my $user = _param($item, 'x-user') // _param($item, 'username');
       $obj->{user} = $user if defined $user && !$obj->{user};
 
+      my @types = _params_list($item, 'type');
+      if (my $ctx = _make_contexts(@types)) { $obj->{contexts} = $ctx }
+      if (my $pref = _make_pref($item)) { $obj->{pref} = $pref }
+      _apply_label($obj, $item, $labels);
+      $map{$id} = $obj;
+    }
+  }
+
+  # Legacy X-service IM properties (Apple/others)
+  my %xservice_map = (
+    'x-aim'     => 'AIM',
+    'x-icq'     => 'ICQ',
+    'x-msn'     => 'MSN',
+    'x-yahoo'   => 'Yahoo',
+    'x-jabber'  => 'Jabber',
+    'x-skype'   => 'Skype',
+    'x-skype-username' => 'Skype',
+    'x-twitter' => 'Twitter',
+    'x-google-talk' => 'GoogleTalk',
+  );
+  for my $propname (sort keys %xservice_map) {
+    for my $item (@{$props->{$propname} // []}) {
+      my $val = $item->{value};
+      next unless defined $val && $val ne '';
+      my $id = _prop_id($item, $new_id);
+      my $obj = { '@type' => 'OnlineService', user => $val, service => $xservice_map{$propname} };
       my @types = _params_list($item, 'type');
       if (my $ctx = _make_contexts(@types)) { $obj->{contexts} = $ctx }
       if (my $pref = _make_pref($item)) { $obj->{pref} = $pref }
@@ -784,28 +858,31 @@ sub _convert_keywords {
   $card->{keywords} = \%keywords if %keywords;
 }
 
-# MEMBER -> members
+# MEMBER / X-ADDRESSBOOKSERVER-MEMBER -> members
 sub _convert_members {
   my ($card, $props) = @_;
-  my $items = $props->{member} || return;
 
   my %members;
-  for my $item (@$items) {
-    my $val = $item->{value};
-    next unless defined $val && $val ne '';
-    $members{$val} = JSON::true;
+  for my $propname (qw(member x-addressbookserver-member)) {
+    for my $item (@{$props->{$propname} // []}) {
+      my $val = $item->{value};
+      next unless defined $val && $val ne '';
+      $members{$val} = JSON::true;
+    }
   }
 
   $card->{members} = \%members if %members;
 }
 
-# RELATED -> relatedTo
+# RELATED / X-ABRELATEDNAMES -> relatedTo
 sub _convert_related {
   my ($card, $props) = @_;
-  my $items = $props->{related} || return;
+  my $labels = _collect_labels($props);
 
   my %related;
-  for my $item (@$items) {
+
+  # Standard RELATED property
+  for my $item (@{$props->{related} // []}) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
 
@@ -815,6 +892,37 @@ sub _convert_related {
       my $lt = lc $t;
       $relation{$lt} = JSON::true
         if $lt =~ /^(acquaintance|agent|child|co-resident|co-worker|colleague|contact|crush|date|emergency|friend|kin|me|met|muse|neighbor|parent|sibling|spouse|sweetheart)$/;
+    }
+    $rel->{relation} = \%relation if %relation;
+    $related{$val} = $rel;
+  }
+
+  # Apple X-ABRELATEDNAMES + X-ABLabel -> relatedTo
+  my %ablabel_relation = (
+    'mother' => 'parent', 'father' => 'parent', 'parent' => 'parent',
+    'brother' => 'sibling', 'sister' => 'sibling',
+    'child' => 'child',
+    'friend' => 'friend',
+    'spouse' => 'spouse', 'partner' => 'spouse',
+    'assistant' => 'colleague', 'manager' => 'colleague',
+  );
+  for my $item (@{$props->{'x-abrelatednames'} // []}) {
+    my $val = _decode_value($item->{value});
+    next unless defined $val && $val ne '';
+
+    my $rel = { '@type' => 'Relation' };
+    my %relation;
+
+    # Get relation type from X-ABLabel
+    my $label;
+    if (my $group = $item->{group}) {
+      $label = $labels->{$group};
+    }
+    if ($label) {
+      my $lt = lc $label;
+      if (my $mapped = $ablabel_relation{$lt}) {
+        $relation{$mapped} = JSON::true;
+      }
     }
     $rel->{relation} = \%relation if %relation;
     $related{$val} = $rel;
@@ -859,6 +967,7 @@ sub _convert_speak_to_as {
 sub jscontact_to_vcard {
   my ($card) = @_;
 
+  _reset_groups();
   my @props;
 
   # VERSION (always 4.0)
@@ -942,6 +1051,27 @@ sub _add_pref_params {
   $params->{pref} = [$pref] if defined $pref;
 }
 
+{
+  my $group_counter = 0;
+  sub _reset_groups { $group_counter = 0 }
+
+  sub _add_label {
+    my ($out, $prop, $obj) = @_;
+    my $label = $obj->{label};
+    return unless defined $label && $label ne '';
+
+    $group_counter++;
+    my $group = "item$group_counter";
+    $prop->{group} = $group;
+    push @$out, {
+      name   => 'x-ablabel',
+      value  => $label,
+      params => {},
+      group  => $group,
+    };
+  }
+}
+
 sub _add_context_params {
   my ($params, $obj) = @_;
   if ($obj->{contexts}) {
@@ -1022,7 +1152,9 @@ sub _unconvert_emails {
     my $params = { 'prop-id' => [$id] };
     _add_context_params($params, $em);
     _add_pref_params($params, $em->{pref});
-    push @$out, { name => 'email', value => $em->{address}, params => $params };
+    my $prop = { name => 'email', value => $em->{address}, params => $params };
+    _add_label($out, $prop, $em);
+    push @$out, $prop;
   }
 }
 
@@ -1049,7 +1181,9 @@ sub _unconvert_phones {
       }
     }
 
-    push @$out, { name => 'tel', value => $ph->{number}, params => $params };
+    my $prop = { name => 'tel', value => $ph->{number}, params => $params };
+    _add_label($out, $prop, $ph);
+    push @$out, $prop;
   }
 }
 
