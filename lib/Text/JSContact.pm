@@ -17,7 +17,7 @@ use JSON;
 use Scalar::Util qw(looks_like_number);
 
 use Exporter 'import';
-our @EXPORT_OK = qw(vcard_to_jscontact jscontact_to_vcard);
+our @EXPORT_OK = qw(vcard_to_jscontact jscontact_to_vcard patch_vcard);
 
 ###############################################################################
 # HELPERS
@@ -1451,6 +1451,17 @@ sub _unconvert_members {
   }
 }
 
+sub _unconvert_members_apple {
+  my ($out, $card) = @_;
+  my $members = $card->{members} || return;
+  for my $uid (sort keys %$members) {
+    # Apple uses urn:uuid: prefix for member UIDs
+    my $val = $uid;
+    $val = "urn:uuid:$val" unless $val =~ /^urn:uuid:/;
+    push @$out, { name => 'x-addressbookserver-member', value => $val, params => {} };
+  }
+}
+
 sub _unconvert_related {
   my ($out, $card) = @_;
   my $related = $card->{relatedTo} || return;
@@ -1483,6 +1494,189 @@ sub _unconvert_speak_to_as {
       push @$out, { name => 'pronouns', value => $p->{pronouns}, params => $params };
     }
   }
+}
+
+###############################################################################
+# PATCH: Apply JSContact changes to an existing vCard with minimal disruption
+###############################################################################
+
+sub patch_vcard {
+  my ($original_vcard, $old_card, $new_card) = @_;
+
+  # Determine which top-level JSContact properties changed
+  my %changed = _diff_cards($old_card, $new_card);
+
+  # If nothing changed, return original
+  return $original_vcard unless %changed;
+
+  # Parse the original vCard into its raw structure
+  my $parsed = eval { vcard2hash($original_vcard, multival => [qw(n adr org)]) };
+  return jscontact_to_vcard($new_card) unless $parsed;
+
+  my $vcard = $parsed->{objects}[0];
+  return jscontact_to_vcard($new_card) unless $vcard && $vcard->{type} eq 'vcard';
+
+  my $props = $vcard->{properties};
+
+  # Detect which property names the original vCard actually uses, so we
+  # generate matching ones (e.g. X-ADDRESSBOOKSERVER-MEMBER vs MEMBER)
+  my %original_has;
+  for my $name (keys %$props) {
+    $original_has{lc $name} = 1 if $props->{$name} && @{$props->{$name}};
+  }
+
+  # For each changed property, regenerate just that part
+  # Map JSContact property names to the vCard properties they affect
+  my %jscontact_to_vcard_props = (
+    name          => [qw(fn n x-phonetic-first-name x-phonetic-middle-name x-phonetic-last-name)],
+    nicknames     => [qw(nickname)],
+    emails        => [qw(email)],
+    phones        => [qw(tel)],
+    addresses     => [qw(adr x-abadr)],
+    organizations => [qw(org)],
+    titles        => [qw(title role)],
+    anniversaries => [qw(bday anniversary deathdate x-abdate)],
+    notes         => [qw(note)],
+    onlineServices => [qw(impp socialprofile x-socialprofile x-aim x-icq x-msn x-yahoo x-jabber x-skype x-twitter x-google-talk x-skype-username)],
+    media         => [qw(photo logo sound)],
+    links         => [qw(url fburl contact-uri)],
+    calendars     => [qw(caluri)],
+    schedulingAddresses => [qw(caladruri)],
+    cryptoKeys    => [qw(key)],
+    directories   => [qw(source org-directory)],
+    keywords      => [qw(categories)],
+    members       => [qw(member x-addressbookserver-member)],
+    relatedTo     => [qw(related x-abrelatednames)],
+    speakToAs     => [qw(gramgender pronouns)],
+    preferredLanguages => [qw(lang)],
+    personalInfo  => [qw(expertise hobby interest)],
+    # Simple scalar properties
+    uid           => [qw(uid)],
+    kind          => [qw(kind x-addressbookserver-kind)],
+    prodId        => [qw(prodid)],
+    updated       => [qw(rev)],
+    created       => [qw(created)],
+    language      => [qw(language)],
+  );
+
+  for my $js_prop (keys %changed) {
+    my $vcard_names = $jscontact_to_vcard_props{$js_prop};
+    next unless $vcard_names;
+
+    # Remove old vCard properties for this JSContact property
+    # Also remove any associated X-ABLabel grouped properties
+    my %groups_to_remove;
+    for my $vname (@$vcard_names) {
+      for my $item (@{$props->{$vname} // []}) {
+        $groups_to_remove{$item->{group}} = 1 if $item->{group};
+      }
+      delete $props->{$vname};
+    }
+
+    # Remove orphaned X-ABLabel entries for removed groups
+    if (%groups_to_remove && $props->{'x-ablabel'}) {
+      $props->{'x-ablabel'} = [
+        grep { !$groups_to_remove{$_->{group} // ''} }
+          @{$props->{'x-ablabel'}}
+      ];
+      delete $props->{'x-ablabel'} unless @{$props->{'x-ablabel'}};
+    }
+  }
+
+  # Generate the new properties from the new card
+  _reset_groups();
+  my @new_props;
+
+  # Generate only the changed properties
+  if ($changed{name})          { _unconvert_name(\@new_props, $new_card) }
+  if ($changed{nicknames})     { _unconvert_nicknames(\@new_props, $new_card) }
+  if ($changed{emails})        { _unconvert_emails(\@new_props, $new_card) }
+  if ($changed{phones})        { _unconvert_phones(\@new_props, $new_card) }
+  if ($changed{addresses})     { _unconvert_addresses(\@new_props, $new_card) }
+  if ($changed{organizations}) { _unconvert_organizations(\@new_props, $new_card) }
+  if ($changed{titles})        { _unconvert_titles(\@new_props, $new_card) }
+  if ($changed{anniversaries}) { _unconvert_anniversaries(\@new_props, $new_card) }
+  if ($changed{notes})         { _unconvert_notes(\@new_props, $new_card) }
+  if ($changed{onlineServices}){ _unconvert_online_services(\@new_props, $new_card) }
+  if ($changed{media})         { _unconvert_media(\@new_props, $new_card) }
+  if ($changed{links})         { _unconvert_links(\@new_props, $new_card) }
+  if ($changed{calendars})     { _unconvert_calendars(\@new_props, $new_card) }
+  if ($changed{schedulingAddresses}) { _unconvert_scheduling_addresses(\@new_props, $new_card) }
+  if ($changed{cryptoKeys})    { _unconvert_crypto_keys(\@new_props, $new_card) }
+  if ($changed{directories})   { _unconvert_directories(\@new_props, $new_card) }
+  if ($changed{keywords})      { _unconvert_keywords(\@new_props, $new_card) }
+  if ($changed{members}) {
+    if ($original_has{'x-addressbookserver-member'}) {
+      _unconvert_members_apple(\@new_props, $new_card);
+    } else {
+      _unconvert_members(\@new_props, $new_card);
+    }
+  }
+  if ($changed{relatedTo})     { _unconvert_related(\@new_props, $new_card) }
+  if ($changed{speakToAs})     { _unconvert_speak_to_as(\@new_props, $new_card) }
+  if ($changed{preferredLanguages}) { _unconvert_preferred_languages(\@new_props, $new_card) }
+  if ($changed{personalInfo})  { _unconvert_personal_info(\@new_props, $new_card) }
+
+  # Simple scalar properties — use Apple property names when original has them
+  for my $spec (['uid', 'uid'], ['prodId', 'prodid'],
+                 ['updated', 'rev'], ['created', 'created'], ['language', 'language']) {
+    my ($js, $vc) = @$spec;
+    if ($changed{$js}) {
+      if (defined $new_card->{$js} && $new_card->{$js} ne '') {
+        push @new_props, { name => $vc, value => $new_card->{$js}, params => {} };
+      }
+    }
+  }
+  if ($changed{kind}) {
+    if (defined $new_card->{kind} && $new_card->{kind} ne '') {
+      my $propname = $original_has{'x-addressbookserver-kind'} ? 'x-addressbookserver-kind' : 'kind';
+      push @new_props, { name => $propname, value => $new_card->{kind}, params => {} };
+    }
+  }
+
+  # Merge new properties into the existing vCard
+  for my $prop (@new_props) {
+    $prop->{params} //= {};
+    push @{$props->{$prop->{name}}}, $prop;
+  }
+
+  return hash2vcard({ objects => [$vcard] });
+}
+
+# Compare two JSContact cards and return hash of changed property names
+sub _diff_cards {
+  my ($old, $new) = @_;
+  my $json = JSON->new->canonical->utf8;
+
+  my %changed;
+
+  # Check all keys in both old and new
+  my %all_keys;
+  $all_keys{$_} = 1 for keys %$old, keys %$new;
+
+  # Skip internal/metadata keys
+  delete $all_keys{$_} for qw(@type version CPath href _raw meta);
+
+  for my $key (keys %all_keys) {
+    my $old_val = $old->{$key};
+    my $new_val = $new->{$key};
+
+    # Both undef/missing -> no change
+    next if !defined $old_val && !defined $new_val;
+
+    # One exists, other doesn't -> changed
+    if (!defined $old_val || !defined $new_val) {
+      $changed{$key} = 1;
+      next;
+    }
+
+    # Compare via canonical JSON encoding
+    my $old_json = $json->encode([$old_val]);
+    my $new_json = $json->encode([$new_val]);
+    $changed{$key} = 1 if $old_json ne $new_json;
+  }
+
+  return %changed;
 }
 
 1;
