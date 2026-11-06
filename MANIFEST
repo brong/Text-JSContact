@@ -11,3 +11,4 @@ t/injection.t
 t/online-services.t
 t/patch.t
 t/rfc9555.t
+t/uri-values.t

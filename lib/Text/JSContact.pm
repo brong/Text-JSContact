@@ -1660,9 +1660,52 @@ sub _hash2vcard {
     $prop->{values} = _clean_vcard_text($prop->{values}) if $prop->{values};
     my $params = $prop->{params} // {};
     $params->{$_} = _clean_vcard_text($params->{$_}) for keys %$params;
+    _write_uri_raw($prop);
   }
 
   return hash2vcard({ objects => [$vcard] });
+}
+
+# RFC 6350 S3.4 escapes COMMA, SEMICOLON, BACKSLASH and NEWLINE in TEXT
+# values only; a URI value is written as it is.  Text::VCardFast escapes
+# every value, which turns "data:image/png;base64,..." into
+# "data:image/png\;base64\,...", no longer a URI (Cyrus then stores it
+# as TEXT with a nonsense media type).  These are the properties whose
+# default value type is URI (RFC 6350 S6, RFC 6715, RFC 8605, RFC 9554),
+# plus Apple's member property.
+my %URI_DEFAULT = map { $_ => 1 } qw(
+  source photo impp geo logo member sound uid url key fburl caladruri
+  caluri related org-directory contact-uri socialprofile
+  x-addressbookserver-member
+);
+
+sub _is_uri_value {
+  my ($prop) = @_;
+  return 0 if $prop->{binary} || exists $prop->{values};
+  my $val = $prop->{value};
+  return 0 if !defined $val || ref $val;
+  # only something that is a URI: a bare IMPP username, a vCard 3 GEO
+  # or a non-URI UID stays TEXT
+  return 0 unless $val =~ /^[a-z][a-z0-9+.-]*:/i;
+  my $params = $prop->{params} // {};
+  return 0 if $params->{encoding};
+  my @vt = map { lc } grep { defined } map { ref $_ ? @$_ : $_ } $params->{value} // ();
+  return $vt[0] eq 'uri' if @vt;
+  return $URI_DEFAULT{lc $prop->{name}} ? 1 : 0;
+}
+
+sub _write_uri_raw {
+  my ($prop) = @_;
+  return unless _is_uri_value($prop);
+  my $val = $prop->{value};
+  # A URI has neither, and written raw a LF would end the content line,
+  # so percent-encode them; it also means a reader's TEXT unescaping
+  # (Text::VCardFast's applies to every value) leaves the URI alone.
+  $val =~ s/\\/%5C/g;
+  $val =~ s/\n/%0A/g;
+  # Text::VCardFast writes proto_strip ahead of the escaped value as is
+  $prop->{proto_strip} = $val;
+  $prop->{value} = '';
 }
 
 sub _clean_vcard_text {
