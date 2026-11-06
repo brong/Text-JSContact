@@ -102,4 +102,11 @@ subtest 'legacy escaped URI still reads' => sub {
   is($card->{media}{m1}{uri}, $data_uri, 'escaped data: URI decoded');
 };
 
+subtest 'media with no uri' => sub {
+  my $vcf = jscontact_to_vcard(card(
+    media => { m1 => { '@type' => 'Media', kind => 'photo', blobId => 'Gabc', mediaType => 'image/png' } },
+  ));
+  is(scalar(() = line_of($vcf, 'PHOTO')), 0, 'no empty PHOTO written');
+};
+
 done_testing;

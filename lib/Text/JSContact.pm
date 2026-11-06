@@ -1339,6 +1339,10 @@ sub _unconvert_media {
 
   for my $id (sort keys %$media) {
     my $m = $media->{$id};
+    # A Media given only by blobId: the caller resolves the blob to a
+    # data: URI first; this module fetches nothing, and an empty PHOTO
+    # is no picture at all.
+    next unless defined $m->{uri} && $m->{uri} ne '';
     my $propname = $kind_to_prop{$m->{kind} // 'photo'} // 'photo';
     my $params = { 'prop-id' => [$id] };
     _add_pref_params($params, $m->{pref});
