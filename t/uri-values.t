@@ -109,4 +109,12 @@ subtest 'media with no uri' => sub {
   is(scalar(() = line_of($vcf, 'PHOTO')), 0, 'no empty PHOTO written');
 };
 
+subtest 'vCard 3 inline photo' => sub {
+  # how Cyrus stores a vCard 4 data: URI PHOTO
+  my $card = vcard_to_jscontact("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:x\r\nFN:V3\r\n"
+    . "PHOTO;PROP-ID=m1;ENCODING=B;TYPE=PNG:$png_b64\r\nEND:VCARD\r\n");
+  is($card->{media}{m1}{uri}, $data_uri, 'base64 kept as is, media type lower-cased');
+  is($card->{media}{m1}{mediaType}, 'image/png', 'mediaType');
+};
+
 done_testing;

@@ -12,7 +12,7 @@ our $VERSION = '0.04';
 
 use Text::VCardFast qw(vcard2hash hash2vcard);
 use Encode qw(decode_utf8 encode_utf8);
-use MIME::Base64 qw(decode_base64 encode_base64);
+use MIME::Base64 qw(decode_base64);
 use JSON;
 use Scalar::Util qw(looks_like_number);
 
@@ -714,10 +714,17 @@ sub _convert_media {
 
       my $encoding = _param($item, 'encoding');
       if ($encoding && lc($encoding) eq 'b') {
+        # vCard 3 inline data (RFC 2426 S3.1.4): TYPE is the format,
+        # e.g. TYPE=PNG; media types are case-insensitive, lower-case
+        # them as RFC 2045 writes them
         my $mediatype = _param($item, 'mediatype') // _param($item, 'type');
-        $mediatype = "image/$mediatype" if $mediatype && $mediatype !~ m{/};
-        $mediatype //= 'application/octet-stream';
-        $obj->{uri}       = "data:$mediatype;base64," . encode_base64($val, '');
+        $mediatype = ($kind eq 'sound' ? 'audio/' : 'image/') . $mediatype
+          if $mediatype && $mediatype !~ m{/};
+        $mediatype = lc($mediatype // 'application/octet-stream');
+        # the value is the base64 text already: Text::VCardFast does
+        # not decode it
+        (my $b64 = $val) =~ s/\s+//g;
+        $obj->{uri}       = "data:$mediatype;base64,$b64";
         $obj->{mediaType} = $mediatype;
       } else {
         $obj->{uri} = $val;
