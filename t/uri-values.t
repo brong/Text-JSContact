@@ -117,4 +117,12 @@ subtest 'vCard 3 inline photo' => sub {
   is($card->{media}{m1}{mediaType}, 'image/png', 'mediaType');
 };
 
+subtest 'vCard 3 inline photo with a TYPE list' => sub {
+  # what Cyrus stores for a PHOTO that had both MEDIATYPE and a data: URI
+  my $card = vcard_to_jscontact("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:x\r\nFN:V3\r\n"
+    . "PHOTO;PROP-ID=m1;TYPE=PNG,PNG;ENCODING=B:$png_b64\r\nEND:VCARD\r\n");
+  is($card->{media}{m1}{uri}, $data_uri, 'one media type in the data: URI');
+  is($card->{media}{m1}{mediaType}, 'image/png', 'mediaType is the first TYPE');
+};
+
 done_testing;

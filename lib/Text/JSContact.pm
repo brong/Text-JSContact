@@ -718,6 +718,10 @@ sub _convert_media {
         # e.g. TYPE=PNG; media types are case-insensitive, lower-case
         # them as RFC 2045 writes them
         my $mediatype = _param($item, 'mediatype') // _param($item, 'type');
+        # TYPE is a list (RFC 2426 S3.1.4 allows one format, but servers
+        # merge: Cyrus writes TYPE=PNG,PNG for a vCard 4 PHOTO that had both
+        # a MEDIATYPE and a data: URI); the format is its first value
+        ($mediatype) = grep { length } split /\s*,\s*/, $mediatype if defined $mediatype;
         $mediatype = ($kind eq 'sound' ? 'audio/' : 'image/') . $mediatype
           if $mediatype && $mediatype !~ m{/};
         $mediatype = lc($mediatype // 'application/octet-stream');
