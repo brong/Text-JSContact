@@ -37,6 +37,12 @@ Revision history for Perl extension Text::JSContact
 	  several parameters were left as bytes and double-encoded when
 	  written), and patch_vcard returns bytes for bytes and characters for
 	  characters instead of splicing characters into bytes
+	- jscontact_to_vcard($card, original => $vcard) writes the Card as a
+	  patch of the vCard it was read from, reading the old Card from
+	  $vcard itself, so a caller no longer has to keep (and not touch) the
+	  Card it first read; an unparseable original gives a new vCard, as
+	  without original.  patch_vcard still works
+	- add t/original.t
 
 0.05  2026-11-07
 	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes

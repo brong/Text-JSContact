@@ -1065,8 +1065,24 @@ sub _convert_speak_to_as {
 # JSCONTACT -> VCARD
 ###############################################################################
 
+# jscontact_to_vcard($card) writes the Card as a new vCard 4.0.
+#
+# jscontact_to_vcard($card, original => $vcard) writes it as a patch of
+# $vcard, the vCard the Card is an edit of (as fetched from the server,
+# bytes or characters): the Card is compared with what $vcard itself
+# reads as, and only the entries that differ are rewritten, so whatever
+# else $vcard holds is kept (see patch_vcard).  The caller need not keep
+# the Card it first read, and may have changed anything in it.  If
+# $vcard cannot be parsed, the Card is written as a new vCard instead.
+#
+# Either way the result is a character string.
 sub jscontact_to_vcard {
-  my ($card) = @_;
+  my ($card, %opts) = @_;
+
+  if (defined $opts{original}) {
+    my $patched = _patch_vcard($opts{original}, $card);
+    return $patched if defined $patched;
+  }
 
   my $ctx = _new_context();
   my @props;
