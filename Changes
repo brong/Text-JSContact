@@ -43,6 +43,14 @@ Revision history for Perl extension Text::JSContact
 	  Card it first read; an unparseable original gives a new vCard, as
 	  without original.  patch_vcard still works
 	- add t/original.t
+	- several values of one N or ADR component, and the keywords in
+	  CATEGORIES, are written as a list (comma-separated) instead of one
+	  value with its commas escaped; a comma inside one value is still
+	  escaped
+	- a TEL whose number is a URI (tel:...) is written with VALUE=uri, so
+	  it is not escaped as TEXT (tel:+1-555\;ext=5); in a vCard 3 patch it
+	  is written as a phone number
+	- a RELATED that is free text, not a URI, is written with VALUE=text
 
 0.05  2026-11-07
 	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes

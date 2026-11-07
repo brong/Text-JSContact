@@ -100,17 +100,32 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.json") {
   like($unfolded, qr/^NOTE;.*:Line one\\; with punctuation\\, commas\\nand a second line\\\\backslash\.$/m,
        'wire: TEXT escaped per RFC 6350 S3.4');
 
-  local $TODO = 'a list of values is joined with "," into one string, which Text::VCardFast then escapes (N lib:1108, ADR lib:1226, CATEGORIES lib:1452)';
   like($unfolded, qr/^N[;:].*:Smith,Jones;/m, 'wire: N surname list is comma-separated, not escaped');
   like($unfolded, qr/^CATEGORIES:colleague,lab,sailing club$/m, 'wire: CATEGORIES is a list, not one escaped value');
 }
 
 {
   my $c = { '@type' => 'Card', version => '2.0', uid => 'x',
+            addresses => { a => { '@type' => 'Address', components => [
+              { kind => 'name', value => '1 Main St' }, { kind => 'name', value => 'Rear, Unit 2' },
+              { kind => 'locality', value => 'Springfield' } ] } },
+            keywords => { 'a,b' => JSON::true, c => JSON::true } };
+  (my $v = jscontact_to_vcard($c)) =~ s/\r?\n[ \t]//g;
+  like($v, qr/^ADR;.*:;;1 Main St,Rear\\, Unit 2;Springfield;;;$/m,
+       'wire: ADR street list comma-separated, a comma inside one value escaped');
+  like($v, qr/^CATEGORIES:a\\,b,c$/m, 'wire: a comma inside one keyword escaped');
+}
+
+{
+  my $c = { '@type' => 'Card', version => '2.0', uid => 'x',
             phones => { p1 => { '@type' => 'Phone', number => 'tel:+1-555-555-5555;ext=5555' } } };
   (my $v = jscontact_to_vcard($c)) =~ s/\r?\n[ \t]//g;
-  local $TODO = 'TEL is not a URI-default property (lib:1681) and VALUE=uri is not written, so a tel: URI is escaped as TEXT';
   like($v, qr/^TEL;.*:tel:\+1-555-555-5555;ext=5555$/m, 'wire: tel: URI written unescaped');
+  like($v, qr/^TEL;[^:]*VALUE=uri/m, 'wire: with VALUE=uri');
+  is(vcard_to_jscontact(encode_utf8($v))->{phones}{p1}{number}, 'tel:+1-555-555-5555;ext=5555', 'tel: URI reads back');
+  my $t = jscontact_to_vcard({ '@type' => 'Card', version => '2.0', uid => 'x',
+            phones => { p1 => { '@type' => 'Phone', number => '+1 555 555 5555' } } });
+  unlike($t, qr/^TEL;[^:]*VALUE=/m, 'wire: a plain number has no VALUE');
 }
 
 {
@@ -125,8 +140,12 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.json") {
   my $c = { '@type' => 'Card', version => '2.0', uid => 'x',
             relatedTo => { 'Ask my deputy John' => { '@type' => 'Relation' } } };
   my $v = jscontact_to_vcard($c);
-  local $TODO = 'RELATED defaults to a URI value (RFC 6350 S6.6.6); free text needs VALUE=text, which lib:1485 never writes';
   like($v, qr/^RELATED;.*VALUE=text/mi, 'wire: free-text RELATED has VALUE=text');
+  my $u = jscontact_to_vcard({ '@type' => 'Card', version => '2.0', uid => 'x',
+            relatedTo => { 'urn:uuid:4e1a2b3c-0000-4000-8000-000000000001' => { '@type' => 'Relation' } } });
+  unlike($u, qr/^RELATED;.*VALUE=/mi, 'wire: a URI RELATED has no VALUE');
+  is(vcard_to_jscontact(encode_utf8($v))->{relatedTo}{'Ask my deputy John'}{'@type'}, 'Relation',
+     'free-text RELATED reads back');
 }
 
 {

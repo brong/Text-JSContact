@@ -1200,11 +1200,12 @@ sub _unconvert_name {
     my @n_values;
     for my $kind (qw(surname given given2 title credential surname2 generation)) {
       my $vals = $by_kind{$kind};
-      push @n_values, $vals ? join(',', grep { defined $_ } @$vals) : '';
+      # several values of one kind are a list (RFC 6350 S6.2.2)
+      push @n_values, $vals ? [ grep { defined $_ } @$vals ] : '';
     }
 
     # Trim trailing empty components
-    pop @n_values while @n_values && $n_values[-1] eq '';
+    pop @n_values while @n_values && !ref $n_values[-1] && $n_values[-1] eq '';
 
     my $params = {};
     if ($name->{sortAs} && ref $name->{sortAs} eq 'HASH') {
@@ -1281,6 +1282,10 @@ sub _unconvert_phones {
       }
     }
 
+    # TEL is TEXT unless it says it is a URI (RFC 6350 S6.4.1); a URI
+    # escaped as TEXT is no longer the URI
+    $params->{value} = ['uri'] if _looks_like_uri($ph->{number});
+
     my $prop = { name => 'tel', value => $ph->{number}, params => $params };
     _add_label($out, $prop, $ph, $ctx);
     push @$out, $prop;
@@ -1317,8 +1322,9 @@ sub _unconvert_addresses {
         my $idx = $kind_to_idx{$c->{kind}};
         push @{$by_idx{$idx}}, $c->{value} if defined $idx;
       }
+      # several values of one component are a list (RFC 6350 S6.3.1)
       for my $idx (keys %by_idx) {
-        $values[$idx] = join(',', @{$by_idx{$idx}});
+        $values[$idx] = $by_idx{$idx};
       }
     }
 
@@ -1544,7 +1550,8 @@ sub _unconvert_keywords {
   my ($out, $card, $ctx) = @_;
   my $keywords = $card->{keywords} || return;
   return unless ref $keywords eq 'HASH' && %$keywords;
-  push @$out, { name => 'categories', value => join(',', sort keys %$keywords), params => {} };
+  # a list: one value, comma-separated (RFC 6350 S6.7.1)
+  push @$out, { name => 'categories', values => [[ sort keys %$keywords ]], params => {} };
 }
 
 sub _unconvert_members {
@@ -1577,6 +1584,8 @@ sub _unconvert_related {
       my @types = sort keys %{$rel->{relation}};
       $params->{type} = \@types if @types;
     }
+    # RELATED is a URI unless VALUE=text says otherwise (RFC 6350 S6.6.6)
+    $params->{value} = ['text'] unless _looks_like_uri($uid);
     push @$out, { name => 'related', value => $uid, params => $params };
   }
 }
@@ -1978,6 +1987,17 @@ sub _to_v3 {
   $p->{'x-user'}         = delete $p->{username}       if $p->{username};
   for my $n (@V4_ONLY_PARAM) {
     $p->{"x-$n"} = delete $p->{$n} if exists $p->{$n};
+  }
+
+  if ($name eq 'tel' && $p->{value}) {
+    # a vCard 3 TEL is a phone number, not a URI (RFC 2426 S3.3.1)
+    delete $p->{value};
+    $prop->{value} =~ s/^tel://i;
+  }
+  elsif ($name eq 'related' && $p->{value}) {
+    # vCard 3 has no RELATED; RFC 2425 values are text unless they say
+    # otherwise, so the vCard 4 VALUE=text is not needed
+    delete $p->{value};
   }
 
   if ($name eq 'kind') {
@@ -2526,6 +2546,12 @@ sub _is_uri_value {
   my @vt = map { lc } grep { defined } map { ref $_ ? @$_ : $_ } $params->{value} // ();
   return $vt[0] eq 'uri' if @vt;
   return $URI_DEFAULT{lc $prop->{name}} ? 1 : 0;
+}
+
+# A value that is a URI: a scheme, a colon, and no white space
+sub _looks_like_uri {
+  my ($val) = @_;
+  return defined $val && !ref $val && $val =~ /^[a-z][a-z0-9+.-]*:\S+\z/i;
 }
 
 sub _uri_text {

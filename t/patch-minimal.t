@@ -291,6 +291,17 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
   is_deeply([ @{$back // {}}{qw(label pref)} ], ['Orchard', 1], 'v3: the new email reads back with its label and pref');
 }
 
+{
+  my $raw = slurp('google-export.vcf');
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  $new->{phones}{ext} = { '@type' => 'Phone', number => 'tel:+1-650-555-0177;ext=7' };
+  $new->{relatedTo}{'Carol Example'} = { '@type' => 'Relation' };
+  my @l = lines(patch_vcard($raw, $old, $new));
+  ok((grep { $_ eq 'TEL:+1-650-555-0177\\;ext=7' } @l), 'v3: a tel: URI is written as a vCard 3 phone number');
+  ok((grep { $_ eq 'RELATED:Carol Example' } @l), 'v3: free text RELATED needs no VALUE=text');
+}
+
 # --- Removing an entry removes its group -----------------------------------
 
 {
