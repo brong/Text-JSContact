@@ -188,7 +188,6 @@ like(jscontact_to_vcard($cyrus), qr/^EMAIL;.*PROP-ID=e1/m, 'Cyrus: map key writt
   # an explicit PROP-ID and an allocated id must not collide
   my $c = vcard_to_jscontact("BEGIN:VCARD\r\nVERSION:4.0\r\nFN:X\r\n"
     . "EMAIL;PROP-ID=1:a\@example.com\r\nEMAIL:b\@example.com\r\nEND:VCARD\r\n");
-  local $TODO = 'allocated ids count from 1 regardless of explicit PROP-IDs (_prop_id lib:55-60, counter lib:178-179); the second overwrites the first';
   is(scalar keys %{$c->{emails} // {}}, 2, 'PROP-ID=1 and an unlabelled EMAIL are both kept');
 }
 

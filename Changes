@@ -9,6 +9,13 @@ Revision history for Perl extension Text::JSContact
 	  name), folded at 75 octets without splitting a character or an
 	  escape; Text::VCardFast is still the parser
 	- add t/deterministic.t
+	- a conversion keeps its counters in a context made for that call,
+	  not in package variables.  An id allocated to a property without
+	  PROP-ID skips every PROP-ID the vCard has, so EMAIL;PROP-ID=1 and
+	  an unnumbered EMAIL no longer both become emails{1}, one lost.
+	  A label group allocated by patch_vcard skips every group the
+	  original vCard has, so a new label no longer takes item1 from a
+	  property that already has one
 
 0.05  2026-11-07
 	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes

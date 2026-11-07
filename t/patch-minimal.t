@@ -62,9 +62,7 @@ sub find_id {
 
 my $REWRITE = 'patch_vcard re-serialises the whole vCard (_hash2vcard, lib:1652): properties reordered, group and parameter names upper-cased, lines refolded';
 my $V4IN3   = 'patch_vcard splices the vCard 4 writer output (PROP-ID lib:1157, PREF lib:1056, lower-case TYPE) into a 3.0 card (lib:1647-1652)';
-my $GROUP   = 'the item counter restarts at 1 for every patch (_reset_groups lib:1596, counter lib:1059-1077), so a new label takes a group the original already uses';
 my $LABEL   = 'X-ABLabel only written for emails and phones (_add_label: lib:1161,1190); patching a property drops the labels of its other values';
-my $RENUMBER = 'the patched lines now carry PROP-IDs and take no number from the id counter (lib:55-60, 178-179), so every property read after them is renumbered';
 
 # a map of objects as a sorted list, to compare without the ids
 sub by_value {
@@ -132,7 +130,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
     is_deeply(by_value($reread->{$key}), by_value($new->{$key}), "Apple: $key unchanged after patching an email (ignoring ids)");
   }
   {
-    local $TODO = $RENUMBER;
     is_deeply({ map { ($_ => $reread->{$_}) } @others }, { map { ($_ => $new->{$_}) } @others },
               'Apple: every other property unchanged, ids included');
   }
@@ -158,7 +155,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
   $new->{emails}{$id}{label} = 'Office';
   my $reread = vcard_to_jscontact(patch_vcard($raw, $old, $new));
   is(($reread->{emails}{$id} // {})->{label}, 'Office', 'Google: new email label written');
-  local $TODO = $GROUP;
   my $ph = find_id($reread->{phones}, number => '+1 650-555-0100');
   is(($reread->{phones}{$ph // ''} // {})->{label}, "Grandma's house",
      'Google: item1 phone keeps its own label');
@@ -174,7 +170,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
   $new->{emails}{$id}{address} = 'alice@newcorp.example';
   my $reread = vcard_to_jscontact(patch_vcard($raw, $old, $new));
   is_deeply([sort keys %{$reread->{emails}}], [sort keys %{$new->{emails}}], 'ids: patched emails keep their ids (written as PROP-ID)');
-  local $TODO = $RENUMBER;
   is_deeply([sort keys %{$reread->{phones}}], [sort keys %{$old->{phones}}], 'ids: untouched phones keep their ids');
 }
 

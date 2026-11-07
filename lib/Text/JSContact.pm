@@ -52,11 +52,57 @@ sub _params_list {
   return map { split /,/ } (ref $val eq 'ARRAY' ? @$val : ($val));
 }
 
+###############################################################################
+# CONVERSION CONTEXT
+###############################################################################
+
+# Everything one conversion allocates lives in a context made for that
+# call: the ids given to vCard properties without a PROP-ID, and the
+# itemN groups that tie an X-ABLabel to its property.  Each allocator is
+# seeded with what the vCard already uses, so an allocated id never
+# equals an explicit PROP-ID and a new group never takes an existing one.
+sub _new_context {
+  my (%args) = @_;
+  return {
+    next_id     => 0,
+    used_ids    => {},    # PROP-IDs present in the vCard
+    next_group  => 0,
+    used_groups => {},    # groups present in the vCard, lower-cased
+    %args,
+  };
+}
+
+# Seed a context with the PROP-IDs and groups of parsed vCard properties
+sub _seed_context {
+  my ($ctx, $props) = @_;
+  for my $item (map { @$_ } values %$props) {
+    my $pid = _param($item, 'prop-id');
+    $ctx->{used_ids}{$pid} = 1 if defined $pid && $pid ne '';
+    $ctx->{used_groups}{lc $item->{group}} = 1 if defined $item->{group} && $item->{group} ne '';
+  }
+  return $ctx;
+}
+
+sub _alloc_id {
+  my ($ctx) = @_;
+  my $id;
+  do { $id = '' . ++$ctx->{next_id} } while $ctx->{used_ids}{$id};
+  return $id;
+}
+
+sub _alloc_group {
+  my ($ctx) = @_;
+  my $group;
+  do { $group = 'item' . ++$ctx->{next_group} } while $ctx->{used_groups}{$group};
+  $ctx->{used_groups}{$group} = 1;
+  return $group;
+}
+
 sub _prop_id {
-  my ($prop, $new_id) = @_;
+  my ($prop, $ctx) = @_;
   my $pid = _param($prop, 'prop-id');
   return $pid if defined $pid && $pid ne '';
-  return $new_id->();
+  return _alloc_id($ctx);
 }
 
 sub _decode_value {
@@ -175,8 +221,7 @@ sub vcard_to_jscontact {
   return undef unless $vcard && $vcard->{type} eq 'vcard';
 
   my $props = $vcard->{properties};
-  my $id_counter = 0;
-  my $new_id = sub { return '' . ++$id_counter };
+  my $ctx = _seed_context(_new_context(), $props);
 
   my $card = {
     '@type' => 'Card',
@@ -199,27 +244,27 @@ sub vcard_to_jscontact {
 
   # Complex properties
   _convert_name($card, $props);
-  _convert_nicknames($card, $props, $new_id);
-  _convert_emails($card, $props, $new_id);
-  _convert_phones($card, $props, $new_id);
-  _convert_addresses($card, $props, $new_id);
-  _convert_organizations($card, $props, $new_id);
-  _convert_titles($card, $props, $new_id);
-  _convert_anniversaries($card, $props, $new_id);
-  _convert_notes($card, $props, $new_id);
-  _convert_online_services($card, $props, $new_id);
-  _convert_media($card, $props, $new_id);
-  _convert_links($card, $props, $new_id);
-  _convert_calendars($card, $props, $new_id);
-  _convert_scheduling_addresses($card, $props, $new_id);
-  _convert_crypto_keys($card, $props, $new_id);
-  _convert_directories($card, $props, $new_id);
-  _convert_preferred_languages($card, $props, $new_id);
-  _convert_personal_info($card, $props, $new_id);
+  _convert_nicknames($card, $props, $ctx);
+  _convert_emails($card, $props, $ctx);
+  _convert_phones($card, $props, $ctx);
+  _convert_addresses($card, $props, $ctx);
+  _convert_organizations($card, $props, $ctx);
+  _convert_titles($card, $props, $ctx);
+  _convert_anniversaries($card, $props, $ctx);
+  _convert_notes($card, $props, $ctx);
+  _convert_online_services($card, $props, $ctx);
+  _convert_media($card, $props, $ctx);
+  _convert_links($card, $props, $ctx);
+  _convert_calendars($card, $props, $ctx);
+  _convert_scheduling_addresses($card, $props, $ctx);
+  _convert_crypto_keys($card, $props, $ctx);
+  _convert_directories($card, $props, $ctx);
+  _convert_preferred_languages($card, $props, $ctx);
+  _convert_personal_info($card, $props, $ctx);
   _convert_keywords($card, $props);
   _convert_members($card, $props);
   _convert_related($card, $props);
-  _convert_speak_to_as($card, $props, $new_id);
+  _convert_speak_to_as($card, $props, $ctx);
 
   return $card;
 }
@@ -293,14 +338,14 @@ sub _convert_name {
 
 # NICKNAME -> nicknames
 sub _convert_nicknames {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{nickname} || return;
 
   my %map;
   for my $item (@$items) {
     my $val = _decode_value($item->{value});
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'Nickname', name => $val };
     if (my $ctx = _make_contexts(_params_list($item, 'type'))) {
       $obj->{contexts} = $ctx;
@@ -314,7 +359,7 @@ sub _convert_nicknames {
 
 # EMAIL -> emails
 sub _convert_emails {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{email} || return;
   my $labels = _collect_labels($props);
 
@@ -322,7 +367,7 @@ sub _convert_emails {
   for my $item (@$items) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'EmailAddress', address => $val };
     if (my $ctx = _make_contexts(_params_list($item, 'type'))) {
       $obj->{contexts} = $ctx;
@@ -337,7 +382,7 @@ sub _convert_emails {
 
 # TEL -> phones
 sub _convert_phones {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{tel} || return;
   my $labels = _collect_labels($props);
 
@@ -351,7 +396,7 @@ sub _convert_phones {
   for my $item (@$items) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'Phone', number => $val };
 
     my @types = _params_list($item, 'type');
@@ -376,7 +421,7 @@ sub _convert_phones {
 
 # ADR -> addresses (+ GEO, TZ by group association)
 sub _convert_addresses {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{adr} || return;
   my $labels = _collect_labels($props);
 
@@ -392,7 +437,7 @@ sub _convert_addresses {
 
   my %map;
   for my $item (@$items) {
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $values = $item->{values} || [];
     my $obj = { '@type' => 'Address' };
 
@@ -458,12 +503,12 @@ sub _convert_addresses {
 
 # ORG -> organizations
 sub _convert_organizations {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{org} || return;
 
   my %map;
   for my $item (@$items) {
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $values = $item->{values} || [];
     my $obj = { '@type' => 'Organization' };
 
@@ -506,7 +551,7 @@ sub _convert_organizations {
 
 # TITLE + ROLE -> titles
 sub _convert_titles {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
 
   my %map;
   for my $spec (['title', 'title'], ['role', 'role']) {
@@ -514,7 +559,7 @@ sub _convert_titles {
     for my $item (@{$props->{$propname} // []}) {
       my $val = _decode_value($item->{value});
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       $map{$id} = { '@type' => 'Title', kind => $kind, name => $val };
     }
   }
@@ -524,7 +569,7 @@ sub _convert_titles {
 
 # BDAY, ANNIVERSARY, DEATHDATE, X-ABDATE -> anniversaries
 sub _convert_anniversaries {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $labels = _collect_labels($props);
 
   my %map;
@@ -533,7 +578,7 @@ sub _convert_anniversaries {
     for my $item (@{$props->{$propname} // []}) {
       my $val = $item->{value};
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       $map{$id} = {
         '@type' => 'Anniversary',
         kind  => $kind,
@@ -546,7 +591,7 @@ sub _convert_anniversaries {
   for my $item (@{$props->{'x-abdate'} // []}) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
 
     my $kind = 'other';
     if (my $group = $item->{group}) {
@@ -571,14 +616,14 @@ sub _convert_anniversaries {
 
 # NOTE -> notes
 sub _convert_notes {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{note} || return;
 
   my %map;
   for my $item (@$items) {
     my $val = _decode_value($item->{value});
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'Note', note => $val };
 
     my $created = _param($item, 'created');
@@ -601,7 +646,7 @@ sub _convert_notes {
 
 # IMPP, SOCIALPROFILE, X-SOCIALPROFILE -> onlineServices
 sub _convert_online_services {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $labels = _collect_labels($props);
 
   my %map;
@@ -609,7 +654,7 @@ sub _convert_online_services {
   for my $item (@{$props->{impp} // []}) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'OnlineService' };
     # RFC 9554 SERVICE-TYPE and USERNAME, as _unconvert_online_services
     # writes them, or the older x- forms
@@ -630,7 +675,7 @@ sub _convert_online_services {
     for my $item (@{$props->{$propname} // []}) {
       my $val = $item->{value};
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'OnlineService' };
 
       if ($val =~ m{://}) { $obj->{uri} = $val }
@@ -675,7 +720,7 @@ sub _convert_online_services {
     for my $item (@{$props->{$propname} // []}) {
       my $val = $item->{value};
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'OnlineService', user => $val, service => $xservice_map{$propname} };
       my @types = _params_list($item, 'type');
       if (my $ctx = _make_contexts(@types)) { $obj->{contexts} = $ctx }
@@ -690,7 +735,7 @@ sub _convert_online_services {
 
 # PHOTO, LOGO, SOUND -> media
 sub _convert_media {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $labels = _collect_labels($props);
 
   my %map;
@@ -699,7 +744,7 @@ sub _convert_media {
     for my $item (@{$props->{$propname} // []}) {
       my $val = $item->{value};
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'Media', kind => $kind };
 
       my $encoding = _param($item, 'encoding');
@@ -737,14 +782,14 @@ sub _convert_media {
 
 # Generic resource converter for URI-based properties
 sub _convert_resource_to {
-  my ($card, $key, $props, $propname, $kind, $new_id, $type) = @_;
+  my ($card, $key, $props, $propname, $kind, $ctx, $type) = @_;
   my $labels = _collect_labels($props);
 
   my %map;
   for my $item (@{$props->{$propname} // []}) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => $type, uri => $val };
     $obj->{kind} = $kind if defined $kind;
     my $mt = _param($item, 'mediatype');
@@ -763,47 +808,47 @@ sub _convert_resource_to {
 
 # URL, FBURL, CONTACT-URI -> links
 sub _convert_links {
-  my ($card, $props, $new_id) = @_;
-  _convert_resource_to($card, 'links', $props, 'url',         undef,     $new_id, 'Link');
-  _convert_resource_to($card, 'links', $props, 'fburl',       'freeBusy', $new_id, 'Link');
-  _convert_resource_to($card, 'links', $props, 'contact-uri', 'contact', $new_id, 'Link');
+  my ($card, $props, $ctx) = @_;
+  _convert_resource_to($card, 'links', $props, 'url',         undef,     $ctx, 'Link');
+  _convert_resource_to($card, 'links', $props, 'fburl',       'freeBusy', $ctx, 'Link');
+  _convert_resource_to($card, 'links', $props, 'contact-uri', 'contact', $ctx, 'Link');
 }
 
 # CALURI -> calendars
 sub _convert_calendars {
-  my ($card, $props, $new_id) = @_;
-  _convert_resource_to($card, 'calendars', $props, 'caluri', undef, $new_id, 'Calendar');
+  my ($card, $props, $ctx) = @_;
+  _convert_resource_to($card, 'calendars', $props, 'caluri', undef, $ctx, 'Calendar');
 }
 
 # CALADRURI -> schedulingAddresses
 sub _convert_scheduling_addresses {
-  my ($card, $props, $new_id) = @_;
-  _convert_resource_to($card, 'schedulingAddresses', $props, 'caladruri', undef, $new_id, 'SchedulingAddress');
+  my ($card, $props, $ctx) = @_;
+  _convert_resource_to($card, 'schedulingAddresses', $props, 'caladruri', undef, $ctx, 'SchedulingAddress');
 }
 
 # KEY -> cryptoKeys
 sub _convert_crypto_keys {
-  my ($card, $props, $new_id) = @_;
-  _convert_resource_to($card, 'cryptoKeys', $props, 'key', undef, $new_id, 'CryptoKey');
+  my ($card, $props, $ctx) = @_;
+  _convert_resource_to($card, 'cryptoKeys', $props, 'key', undef, $ctx, 'CryptoKey');
 }
 
 # SOURCE, ORG-DIRECTORY -> directories
 sub _convert_directories {
-  my ($card, $props, $new_id) = @_;
-  _convert_resource_to($card, 'directories', $props, 'source',        'entry',     $new_id, 'Directory');
-  _convert_resource_to($card, 'directories', $props, 'org-directory', 'directory', $new_id, 'Directory');
+  my ($card, $props, $ctx) = @_;
+  _convert_resource_to($card, 'directories', $props, 'source',        'entry',     $ctx, 'Directory');
+  _convert_resource_to($card, 'directories', $props, 'org-directory', 'directory', $ctx, 'Directory');
 }
 
 # LANG -> preferredLanguages
 sub _convert_preferred_languages {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
   my $items = $props->{lang} || return;
 
   my %map;
   for my $item (@$items) {
     my $val = $item->{value};
     next unless defined $val && $val ne '';
-    my $id = _prop_id($item, $new_id);
+    my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'LanguagePref', language => $val };
     my @types = _params_list($item, 'type');
     if (my $ctx = _make_contexts(@types)) { $obj->{contexts} = $ctx }
@@ -816,7 +861,7 @@ sub _convert_preferred_languages {
 
 # EXPERTISE, HOBBY, INTEREST -> personalInfo
 sub _convert_personal_info {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
 
   my %level_map = (beginner => 'low', average => 'medium', expert => 'high');
   my %map;
@@ -826,7 +871,7 @@ sub _convert_personal_info {
     for my $item (@{$props->{$propname} // []}) {
       my $val = _decode_value($item->{value});
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'PersonalInfo', kind => $kind, value => $val };
 
       my $level = _param($item, 'level');
@@ -938,7 +983,7 @@ sub _convert_related {
 
 # GRAMGENDER, PRONOUNS (RFC 9554) -> speakToAs
 sub _convert_speak_to_as {
-  my ($card, $props, $new_id) = @_;
+  my ($card, $props, $ctx) = @_;
 
   my $speak = {};
 
@@ -951,7 +996,7 @@ sub _convert_speak_to_as {
     for my $item (@$items) {
       my $val = _decode_value($item->{value});
       next unless defined $val && $val ne '';
-      my $id = _prop_id($item, $new_id);
+      my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'Pronouns', pronouns => $val };
       if (my $ctx = _make_contexts(_params_list($item, 'type'))) {
         $obj->{contexts} = $ctx;
@@ -972,7 +1017,7 @@ sub _convert_speak_to_as {
 sub jscontact_to_vcard {
   my ($card) = @_;
 
-  _reset_groups();
+  my $ctx = _new_context();
   my @props;
 
   # VERSION (always 4.0)
@@ -998,30 +1043,30 @@ sub jscontact_to_vcard {
   push @props, { name => 'language', value => $card->{language} } if $card->{language};
 
   # Name -> N + FN
-  _unconvert_name(\@props, $card);
+  _unconvert_name(\@props, $card, $ctx);
 
   # All map-based properties
-  _unconvert_nicknames(\@props, $card);
-  _unconvert_emails(\@props, $card);
-  _unconvert_phones(\@props, $card);
-  _unconvert_addresses(\@props, $card);
-  _unconvert_organizations(\@props, $card);
-  _unconvert_titles(\@props, $card);
-  _unconvert_anniversaries(\@props, $card);
-  _unconvert_notes(\@props, $card);
-  _unconvert_online_services(\@props, $card);
-  _unconvert_media(\@props, $card);
-  _unconvert_links(\@props, $card);
-  _unconvert_calendars(\@props, $card);
-  _unconvert_scheduling_addresses(\@props, $card);
-  _unconvert_crypto_keys(\@props, $card);
-  _unconvert_directories(\@props, $card);
-  _unconvert_preferred_languages(\@props, $card);
-  _unconvert_personal_info(\@props, $card);
-  _unconvert_keywords(\@props, $card);
-  _unconvert_members(\@props, $card);
-  _unconvert_related(\@props, $card);
-  _unconvert_speak_to_as(\@props, $card);
+  _unconvert_nicknames(\@props, $card, $ctx);
+  _unconvert_emails(\@props, $card, $ctx);
+  _unconvert_phones(\@props, $card, $ctx);
+  _unconvert_addresses(\@props, $card, $ctx);
+  _unconvert_organizations(\@props, $card, $ctx);
+  _unconvert_titles(\@props, $card, $ctx);
+  _unconvert_anniversaries(\@props, $card, $ctx);
+  _unconvert_notes(\@props, $card, $ctx);
+  _unconvert_online_services(\@props, $card, $ctx);
+  _unconvert_media(\@props, $card, $ctx);
+  _unconvert_links(\@props, $card, $ctx);
+  _unconvert_calendars(\@props, $card, $ctx);
+  _unconvert_scheduling_addresses(\@props, $card, $ctx);
+  _unconvert_crypto_keys(\@props, $card, $ctx);
+  _unconvert_directories(\@props, $card, $ctx);
+  _unconvert_preferred_languages(\@props, $card, $ctx);
+  _unconvert_personal_info(\@props, $card, $ctx);
+  _unconvert_keywords(\@props, $card, $ctx);
+  _unconvert_members(\@props, $card, $ctx);
+  _unconvert_related(\@props, $card, $ctx);
+  _unconvert_speak_to_as(\@props, $card, $ctx);
 
   # Build vcard hash structure
   my %by_name;
@@ -1056,25 +1101,19 @@ sub _add_pref_params {
   $params->{pref} = [$pref] if defined $pref;
 }
 
-{
-  my $group_counter = 0;
-  sub _reset_groups { $group_counter = 0 }
+sub _add_label {
+  my ($out, $prop, $obj, $ctx) = @_;
+  my $label = $obj->{label};
+  return unless defined $label && $label ne '';
 
-  sub _add_label {
-    my ($out, $prop, $obj) = @_;
-    my $label = $obj->{label};
-    return unless defined $label && $label ne '';
-
-    $group_counter++;
-    my $group = "item$group_counter";
-    $prop->{group} = $group;
-    push @$out, {
-      name   => 'x-ablabel',
-      value  => $label,
-      params => {},
-      group  => $group,
-    };
-  }
+  my $group = _alloc_group($ctx);
+  $prop->{group} = $group;
+  push @$out, {
+    name   => 'x-ablabel',
+    value  => $label,
+    params => {},
+    group  => $group,
+  };
 }
 
 sub _add_context_params {
@@ -1086,7 +1125,7 @@ sub _add_context_params {
 }
 
 sub _unconvert_name {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $name = $card->{name} || return;
 
   # FN
@@ -1136,7 +1175,7 @@ sub _unconvert_name {
 }
 
 sub _unconvert_nicknames {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $nicknames = $card->{nicknames} || return;
 
   for my $id (sort keys %$nicknames) {
@@ -1149,7 +1188,7 @@ sub _unconvert_nicknames {
 }
 
 sub _unconvert_emails {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $emails = $card->{emails} || return;
 
   for my $id (sort keys %$emails) {
@@ -1158,13 +1197,13 @@ sub _unconvert_emails {
     _add_context_params($params, $em);
     _add_pref_params($params, $em->{pref});
     my $prop = { name => 'email', value => $em->{address}, params => $params };
-    _add_label($out, $prop, $em);
+    _add_label($out, $prop, $em, $ctx);
     push @$out, $prop;
   }
 }
 
 sub _unconvert_phones {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $phones = $card->{phones} || return;
 
   my %feature_to_type = (
@@ -1187,13 +1226,13 @@ sub _unconvert_phones {
     }
 
     my $prop = { name => 'tel', value => $ph->{number}, params => $params };
-    _add_label($out, $prop, $ph);
+    _add_label($out, $prop, $ph, $ctx);
     push @$out, $prop;
   }
 }
 
 sub _unconvert_addresses {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $addresses = $card->{addresses} || return;
 
   my %kind_to_idx = (
@@ -1232,7 +1271,7 @@ sub _unconvert_addresses {
 }
 
 sub _unconvert_organizations {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $orgs = $card->{organizations} || return;
 
   for my $id (sort keys %$orgs) {
@@ -1263,7 +1302,7 @@ sub _unconvert_organizations {
 }
 
 sub _unconvert_titles {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $titles = $card->{titles} || return;
 
   for my $id (sort keys %$titles) {
@@ -1275,7 +1314,7 @@ sub _unconvert_titles {
 }
 
 sub _unconvert_anniversaries {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $anns = $card->{anniversaries} || return;
 
   my %kind_to_prop = (birth => 'bday', wedding => 'anniversary', death => 'deathdate');
@@ -1295,7 +1334,7 @@ sub _unconvert_anniversaries {
 }
 
 sub _unconvert_notes {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $notes = $card->{notes} || return;
 
   for my $id (sort keys %$notes) {
@@ -1315,7 +1354,7 @@ sub _unconvert_notes {
 }
 
 sub _unconvert_online_services {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $services = $card->{onlineServices} || return;
 
   for my $id (sort keys %$services) {
@@ -1333,7 +1372,7 @@ sub _unconvert_online_services {
 }
 
 sub _unconvert_media {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $media = $card->{media} || return;
 
   my %kind_to_prop = (photo => 'photo', logo => 'logo', sound => 'sound');
@@ -1353,7 +1392,7 @@ sub _unconvert_media {
 }
 
 sub _unconvert_links {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $links = $card->{links} || return;
 
   for my $id (sort keys %$links) {
@@ -1371,7 +1410,7 @@ sub _unconvert_links {
 }
 
 sub _unconvert_resource {
-  my ($out, $card, $key, $propname) = @_;
+  my ($out, $ctx, $card, $key, $propname) = @_;
   my $resources = $card->{$key} || return;
 
   for my $id (sort keys %$resources) {
@@ -1385,19 +1424,19 @@ sub _unconvert_resource {
 }
 
 sub _unconvert_calendars {
-  _unconvert_resource($_[0], $_[1], 'calendars', 'caluri');
+  _unconvert_resource($_[0], $_[2], $_[1], 'calendars', 'caluri');
 }
 
 sub _unconvert_scheduling_addresses {
-  _unconvert_resource($_[0], $_[1], 'schedulingAddresses', 'caladruri');
+  _unconvert_resource($_[0], $_[2], $_[1], 'schedulingAddresses', 'caladruri');
 }
 
 sub _unconvert_crypto_keys {
-  _unconvert_resource($_[0], $_[1], 'cryptoKeys', 'key');
+  _unconvert_resource($_[0], $_[2], $_[1], 'cryptoKeys', 'key');
 }
 
 sub _unconvert_directories {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $dirs = $card->{directories} || return;
 
   for my $id (sort keys %$dirs) {
@@ -1413,7 +1452,7 @@ sub _unconvert_directories {
 }
 
 sub _unconvert_preferred_languages {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $langs = $card->{preferredLanguages} || return;
 
   for my $id (sort keys %$langs) {
@@ -1426,7 +1465,7 @@ sub _unconvert_preferred_languages {
 }
 
 sub _unconvert_personal_info {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $info = $card->{personalInfo} || return;
 
   my %level_map = (low => 'beginner', medium => 'average', high => 'expert');
@@ -1446,14 +1485,14 @@ sub _unconvert_personal_info {
 }
 
 sub _unconvert_keywords {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $keywords = $card->{keywords} || return;
   return unless ref $keywords eq 'HASH' && %$keywords;
   push @$out, { name => 'categories', value => join(',', sort keys %$keywords), params => {} };
 }
 
 sub _unconvert_members {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $members = $card->{members} || return;
   for my $uid (sort keys %$members) {
     push @$out, { name => 'member', value => $uid, params => {} };
@@ -1461,7 +1500,7 @@ sub _unconvert_members {
 }
 
 sub _unconvert_members_apple {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $members = $card->{members} || return;
   for my $uid (sort keys %$members) {
     # Apple uses urn:uuid: prefix for member UIDs
@@ -1472,7 +1511,7 @@ sub _unconvert_members_apple {
 }
 
 sub _unconvert_related {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $related = $card->{relatedTo} || return;
 
   for my $uid (sort keys %$related) {
@@ -1487,7 +1526,7 @@ sub _unconvert_related {
 }
 
 sub _unconvert_speak_to_as {
-  my ($out, $card) = @_;
+  my ($out, $card, $ctx) = @_;
   my $sta = $card->{speakToAs} || return;
 
   if ($sta->{grammaticalGender}) {
@@ -1592,39 +1631,40 @@ sub patch_vcard {
     }
   }
 
-  # Generate the new properties from the new card
-  _reset_groups();
+  # Generate the new properties from the new card; a new label must not
+  # take a group the original vCard uses
+  my $ctx = _seed_context(_new_context(), $props);
   my @new_props;
 
   # Generate only the changed properties
-  if ($changed{name})          { _unconvert_name(\@new_props, $new_card) }
-  if ($changed{nicknames})     { _unconvert_nicknames(\@new_props, $new_card) }
-  if ($changed{emails})        { _unconvert_emails(\@new_props, $new_card) }
-  if ($changed{phones})        { _unconvert_phones(\@new_props, $new_card) }
-  if ($changed{addresses})     { _unconvert_addresses(\@new_props, $new_card) }
-  if ($changed{organizations}) { _unconvert_organizations(\@new_props, $new_card) }
-  if ($changed{titles})        { _unconvert_titles(\@new_props, $new_card) }
-  if ($changed{anniversaries}) { _unconvert_anniversaries(\@new_props, $new_card) }
-  if ($changed{notes})         { _unconvert_notes(\@new_props, $new_card) }
-  if ($changed{onlineServices}){ _unconvert_online_services(\@new_props, $new_card) }
-  if ($changed{media})         { _unconvert_media(\@new_props, $new_card) }
-  if ($changed{links})         { _unconvert_links(\@new_props, $new_card) }
-  if ($changed{calendars})     { _unconvert_calendars(\@new_props, $new_card) }
-  if ($changed{schedulingAddresses}) { _unconvert_scheduling_addresses(\@new_props, $new_card) }
-  if ($changed{cryptoKeys})    { _unconvert_crypto_keys(\@new_props, $new_card) }
-  if ($changed{directories})   { _unconvert_directories(\@new_props, $new_card) }
-  if ($changed{keywords})      { _unconvert_keywords(\@new_props, $new_card) }
+  if ($changed{name})          { _unconvert_name(\@new_props, $new_card, $ctx) }
+  if ($changed{nicknames})     { _unconvert_nicknames(\@new_props, $new_card, $ctx) }
+  if ($changed{emails})        { _unconvert_emails(\@new_props, $new_card, $ctx) }
+  if ($changed{phones})        { _unconvert_phones(\@new_props, $new_card, $ctx) }
+  if ($changed{addresses})     { _unconvert_addresses(\@new_props, $new_card, $ctx) }
+  if ($changed{organizations}) { _unconvert_organizations(\@new_props, $new_card, $ctx) }
+  if ($changed{titles})        { _unconvert_titles(\@new_props, $new_card, $ctx) }
+  if ($changed{anniversaries}) { _unconvert_anniversaries(\@new_props, $new_card, $ctx) }
+  if ($changed{notes})         { _unconvert_notes(\@new_props, $new_card, $ctx) }
+  if ($changed{onlineServices}){ _unconvert_online_services(\@new_props, $new_card, $ctx) }
+  if ($changed{media})         { _unconvert_media(\@new_props, $new_card, $ctx) }
+  if ($changed{links})         { _unconvert_links(\@new_props, $new_card, $ctx) }
+  if ($changed{calendars})     { _unconvert_calendars(\@new_props, $new_card, $ctx) }
+  if ($changed{schedulingAddresses}) { _unconvert_scheduling_addresses(\@new_props, $new_card, $ctx) }
+  if ($changed{cryptoKeys})    { _unconvert_crypto_keys(\@new_props, $new_card, $ctx) }
+  if ($changed{directories})   { _unconvert_directories(\@new_props, $new_card, $ctx) }
+  if ($changed{keywords})      { _unconvert_keywords(\@new_props, $new_card, $ctx) }
   if ($changed{members}) {
     if ($original_has{'x-addressbookserver-member'}) {
-      _unconvert_members_apple(\@new_props, $new_card);
+      _unconvert_members_apple(\@new_props, $new_card, $ctx);
     } else {
-      _unconvert_members(\@new_props, $new_card);
+      _unconvert_members(\@new_props, $new_card, $ctx);
     }
   }
-  if ($changed{relatedTo})     { _unconvert_related(\@new_props, $new_card) }
-  if ($changed{speakToAs})     { _unconvert_speak_to_as(\@new_props, $new_card) }
-  if ($changed{preferredLanguages}) { _unconvert_preferred_languages(\@new_props, $new_card) }
-  if ($changed{personalInfo})  { _unconvert_personal_info(\@new_props, $new_card) }
+  if ($changed{relatedTo})     { _unconvert_related(\@new_props, $new_card, $ctx) }
+  if ($changed{speakToAs})     { _unconvert_speak_to_as(\@new_props, $new_card, $ctx) }
+  if ($changed{preferredLanguages}) { _unconvert_preferred_languages(\@new_props, $new_card, $ctx) }
+  if ($changed{personalInfo})  { _unconvert_personal_info(\@new_props, $new_card, $ctx) }
 
   # Simple scalar properties — use Apple property names when original has them
   for my $spec (['uid', 'uid'], ['prodId', 'prodid'],
