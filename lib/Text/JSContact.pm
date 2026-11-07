@@ -14,7 +14,8 @@ use Text::VCardFast qw(vcard2hash);
 use Encode qw(decode_utf8 encode_utf8);
 use MIME::Base64 qw(decode_base64);
 use JSON;
-use Scalar::Util qw(looks_like_number);
+use Scalar::Util qw(looks_like_number refaddr);
+use feature 'state';
 
 use Exporter 'import';
 our @EXPORT_OK = qw(vcard_to_jscontact jscontact_to_vcard patch_vcard);
@@ -37,9 +38,14 @@ sub _first_value {
   return $prop->{value};
 }
 
+# vCard 4 parameters that a vCard 3 card carries as X- (see _to_v3)
+my %X_FALLBACK = map { $_ => 1 } qw(label geo tz cc mediatype sort-as level
+  index created author author-name);
+
 sub _param {
   my ($prop, $name) = @_;
   my $val = $prop->{params}{$name};
+  $val = $prop->{params}{"x-$name"} if !defined $val && $X_FALLBACK{$name};
   return undef unless defined $val;
   return ref $val eq 'ARRAY' ? $val->[0] : $val;
 }
@@ -83,6 +89,13 @@ sub _seed_context {
   return $ctx;
 }
 
+# TODO(registry): an allocated id is a position in reading order, across
+# the whole card.  A vCard without PROP-IDs (every vCard 3 card, which
+# patch_vcard keeps free of them, and many vCard 4 ones) therefore keeps
+# its ids only while no entry before them is added or removed: patching
+# one entry out renumbers every entry read after it.  Counting per map
+# would confine that to the one map; stable ids need either PROP-IDs
+# written on every line or ids the registry derives some other way.
 sub _alloc_id {
   my ($ctx) = @_;
   my $id;
@@ -101,17 +114,21 @@ sub _alloc_group {
 sub _prop_id {
   my ($prop, $ctx) = @_;
   my $pid = _param($prop, 'prop-id');
-  return $pid if defined $pid && $pid ne '';
-  return _alloc_id($ctx);
+  $pid = _alloc_id($ctx) unless defined $pid && $pid ne '';
+  push @{$ctx->{pending}}, [$pid, $prop];
+  return $pid;
 }
 
-sub _decode_value {
-  my $val = shift;
-  return undef unless defined $val;
-  if ($val =~ /[\x80-\xff]/) {
-    $val = eval { decode_utf8($val) } // $val;
-  }
-  return $val;
+# A vCard read from a CardDAV server is UTF-8 bytes (RFC 6350 S3.1).
+# Decode it once, before parsing, so every value is characters; one that
+# is not valid UTF-8 is read as Latin-1, a character per byte.  A string
+# that is characters already is left alone.
+sub _decode_input {
+  my ($s) = @_;
+  return $s if !defined $s || utf8::is_utf8($s) || $s !~ /[\x80-\xff]/;
+  my $bytes = $s;
+  my $chars = eval { Encode::decode('UTF-8', $bytes, Encode::FB_CROAK) };
+  return defined $chars ? $chars : $s;
 }
 
 sub _make_contexts {
@@ -213,12 +230,44 @@ sub _adr_values {
 
 sub vcard_to_jscontact {
   my ($vcard_string) = @_;
+  my ($card) = _read_vcard(_decode_input($vcard_string));
+  return $card;
+}
+
+# The converters that fill a map of the Card, each with the key it fills:
+# the ids a converter allocates are recorded against that key, so a patch
+# knows which vCard property each entry came from
+my @MAP_CONVERTERS = (
+  [ nicknames           => \&_convert_nicknames ],
+  [ emails              => \&_convert_emails ],
+  [ phones              => \&_convert_phones ],
+  [ addresses           => \&_convert_addresses ],
+  [ organizations       => \&_convert_organizations ],
+  [ titles              => \&_convert_titles ],
+  [ anniversaries       => \&_convert_anniversaries ],
+  [ notes               => \&_convert_notes ],
+  [ onlineServices      => \&_convert_online_services ],
+  [ media               => \&_convert_media ],
+  [ links               => \&_convert_links ],
+  [ calendars           => \&_convert_calendars ],
+  [ schedulingAddresses => \&_convert_scheduling_addresses ],
+  [ cryptoKeys          => \&_convert_crypto_keys ],
+  [ directories         => \&_convert_directories ],
+  [ preferredLanguages  => \&_convert_preferred_languages ],
+  [ personalInfo        => \&_convert_personal_info ],
+);
+
+# Read a vCard given as characters.  Returns the Card, the conversion
+# context (whose {sources} maps each Card entry to the vCard properties it
+# was read from) and the parsed properties; nothing if it does not parse.
+sub _read_vcard {
+  my ($vcard_string) = @_;
 
   my $parsed = eval { vcard2hash($vcard_string, multival => [qw(n adr org)]) };
-  return undef unless $parsed && $parsed->{objects} && @{$parsed->{objects}};
+  return unless $parsed && $parsed->{objects} && @{$parsed->{objects}};
 
   my $vcard = $parsed->{objects}[0];
-  return undef unless $vcard && $vcard->{type} eq 'vcard';
+  return unless $vcard && $vcard->{type} eq 'vcard';
 
   my $props = $vcard->{properties};
   my $ctx = _seed_context(_new_context(), $props);
@@ -244,29 +293,28 @@ sub vcard_to_jscontact {
 
   # Complex properties
   _convert_name($card, $props);
-  _convert_nicknames($card, $props, $ctx);
-  _convert_emails($card, $props, $ctx);
-  _convert_phones($card, $props, $ctx);
-  _convert_addresses($card, $props, $ctx);
-  _convert_organizations($card, $props, $ctx);
-  _convert_titles($card, $props, $ctx);
-  _convert_anniversaries($card, $props, $ctx);
-  _convert_notes($card, $props, $ctx);
-  _convert_online_services($card, $props, $ctx);
-  _convert_media($card, $props, $ctx);
-  _convert_links($card, $props, $ctx);
-  _convert_calendars($card, $props, $ctx);
-  _convert_scheduling_addresses($card, $props, $ctx);
-  _convert_crypto_keys($card, $props, $ctx);
-  _convert_directories($card, $props, $ctx);
-  _convert_preferred_languages($card, $props, $ctx);
-  _convert_personal_info($card, $props, $ctx);
+  for my $conv (@MAP_CONVERTERS) {
+    my ($key, $fn) = @$conv;
+    $fn->($card, $props, $ctx);
+    _claim_sources($ctx, $key);
+  }
   _convert_keywords($card, $props);
-  _convert_members($card, $props);
-  _convert_related($card, $props);
+  _convert_members($card, $props, $ctx);
+  _convert_related($card, $props, $ctx);
   _convert_speak_to_as($card, $props, $ctx);
+  _claim_sources($ctx, 'speakToAs');
 
-  return $card;
+  return ($card, $ctx, $props);
+}
+
+# The ids handed out since the last claim belong to $key
+sub _claim_sources {
+  my ($ctx, $key) = @_;
+  for my $pair (@{$ctx->{pending} // []}) {
+    my ($id, $item) = @$pair;
+    push @{$ctx->{sources}{$key}{$id}}, $item;
+  }
+  $ctx->{pending} = [];
 }
 
 ###############################################################################
@@ -279,7 +327,7 @@ sub _convert_name {
   my $name = {};
 
   my $fn = _first_value($props, 'fn');
-  $name->{full} = _decode_value($fn) if defined $fn;
+  $name->{full} = $fn if defined $fn;
 
   my $n_prop = _first_prop($props, 'n');
   if ($n_prop) {
@@ -301,7 +349,7 @@ sub _convert_name {
         push @components, {
           '@type' => 'NameComponent',
           kind  => $kind_map[$idx],
-          value => _decode_value($v),
+          value => $v,
         };
       }
     }
@@ -327,9 +375,9 @@ sub _convert_name {
   my $phonMid   = _first_value($props, 'x-phonetic-middle-name');
   if ($phonFirst || $phonLast || $phonMid) {
     my @phon;
-    push @phon, { '@type' => 'NameComponent', kind => 'given',   value => _decode_value($phonFirst), phonetic => 'ipa' } if $phonFirst;
-    push @phon, { '@type' => 'NameComponent', kind => 'given2',  value => _decode_value($phonMid),   phonetic => 'ipa' } if $phonMid;
-    push @phon, { '@type' => 'NameComponent', kind => 'surname', value => _decode_value($phonLast),  phonetic => 'ipa' } if $phonLast;
+    push @phon, { '@type' => 'NameComponent', kind => 'given',   value => $phonFirst, phonetic => 'ipa' } if $phonFirst;
+    push @phon, { '@type' => 'NameComponent', kind => 'given2',  value => $phonMid,   phonetic => 'ipa' } if $phonMid;
+    push @phon, { '@type' => 'NameComponent', kind => 'surname', value => $phonLast,  phonetic => 'ipa' } if $phonLast;
     $name->{phoneticComponents} = \@phon;
   }
 
@@ -343,7 +391,7 @@ sub _convert_nicknames {
 
   my %map;
   for my $item (@$items) {
-    my $val = _decode_value($item->{value});
+    my $val = $item->{value};
     next unless defined $val && $val ne '';
     my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'Nickname', name => $val };
@@ -445,22 +493,22 @@ sub _convert_addresses {
     # Indices: 0=POBox 1=Extended 2=Street 3=Locality 4=Region 5=PostCode 6=Country
     my @components;
     for my $v (_adr_values($values, 2)) {
-      push @components, { '@type' => 'AddressComponent', kind => 'name', value => _decode_value($v) };
+      push @components, { '@type' => 'AddressComponent', kind => 'name', value => $v };
     }
     for my $v (_adr_values($values, 1)) {
-      push @components, { '@type' => 'AddressComponent', kind => 'apartment', value => _decode_value($v) };
+      push @components, { '@type' => 'AddressComponent', kind => 'apartment', value => $v };
     }
     for my $v (_adr_values($values, 3)) {
-      push @components, { '@type' => 'AddressComponent', kind => 'locality', value => _decode_value($v) };
+      push @components, { '@type' => 'AddressComponent', kind => 'locality', value => $v };
     }
     for my $v (_adr_values($values, 4)) {
-      push @components, { '@type' => 'AddressComponent', kind => 'region', value => _decode_value($v) };
+      push @components, { '@type' => 'AddressComponent', kind => 'region', value => $v };
     }
     for my $v (_adr_values($values, 5)) {
-      push @components, { '@type' => 'AddressComponent', kind => 'postcode', value => _decode_value($v) };
+      push @components, { '@type' => 'AddressComponent', kind => 'postcode', value => $v };
     }
     for my $v (_adr_values($values, 6)) {
-      push @components, { '@type' => 'AddressComponent', kind => 'country', value => _decode_value($v) };
+      push @components, { '@type' => 'AddressComponent', kind => 'country', value => $v };
     }
     $obj->{components} = \@components if @components;
 
@@ -523,7 +571,7 @@ sub _convert_organizations {
       my @vals = ref $values->[$i] eq 'ARRAY' ? @{$values->[$i]} : ($values->[$i]);
       for my $v (@vals) {
         next unless defined $v && $v ne '';
-        push @units, { '@type' => 'OrgUnit', name => _decode_value($v) };
+        push @units, { '@type' => 'OrgUnit', name => $v };
       }
     }
     $obj->{units} = \@units if @units;
@@ -557,7 +605,7 @@ sub _convert_titles {
   for my $spec (['title', 'title'], ['role', 'role']) {
     my ($propname, $kind) = @$spec;
     for my $item (@{$props->{$propname} // []}) {
-      my $val = _decode_value($item->{value});
+      my $val = $item->{value};
       next unless defined $val && $val ne '';
       my $id = _prop_id($item, $ctx);
       $map{$id} = { '@type' => 'Title', kind => $kind, name => $val };
@@ -621,7 +669,7 @@ sub _convert_notes {
 
   my %map;
   for my $item (@$items) {
-    my $val = _decode_value($item->{value});
+    my $val = $item->{value};
     next unless defined $val && $val ne '';
     my $id = _prop_id($item, $ctx);
     my $obj = { '@type' => 'Note', note => $val };
@@ -869,7 +917,7 @@ sub _convert_personal_info {
   for my $spec (['expertise', 'expertise'], ['hobby', 'hobby'], ['interest', 'interest']) {
     my ($propname, $kind) = @$spec;
     for my $item (@{$props->{$propname} // []}) {
-      my $val = _decode_value($item->{value});
+      my $val = $item->{value};
       next unless defined $val && $val ne '';
       my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'PersonalInfo', kind => $kind, value => $val };
@@ -910,7 +958,7 @@ sub _convert_keywords {
 
 # MEMBER / X-ADDRESSBOOKSERVER-MEMBER -> members
 sub _convert_members {
-  my ($card, $props) = @_;
+  my ($card, $props, $ctx) = @_;
 
   my %members;
   for my $propname (qw(member x-addressbookserver-member)) {
@@ -918,6 +966,7 @@ sub _convert_members {
       my $val = $item->{value};
       next unless defined $val && $val ne '';
       $members{$val} = JSON::true;
+      push @{$ctx->{sources}{members}{$val}}, $item if $ctx;
     }
   }
 
@@ -926,7 +975,7 @@ sub _convert_members {
 
 # RELATED / X-ABRELATEDNAMES -> relatedTo
 sub _convert_related {
-  my ($card, $props) = @_;
+  my ($card, $props, $ctx) = @_;
   my $labels = _collect_labels($props);
 
   my %related;
@@ -945,6 +994,7 @@ sub _convert_related {
     }
     $rel->{relation} = \%relation if %relation;
     $related{$val} = $rel;
+    push @{$ctx->{sources}{relatedTo}{$val}}, $item if $ctx;
   }
 
   # Apple X-ABRELATEDNAMES + X-ABLabel -> relatedTo
@@ -957,7 +1007,7 @@ sub _convert_related {
     'assistant' => 'colleague', 'manager' => 'colleague',
   );
   for my $item (@{$props->{'x-abrelatednames'} // []}) {
-    my $val = _decode_value($item->{value});
+    my $val = $item->{value};
     next unless defined $val && $val ne '';
 
     my $rel = { '@type' => 'Relation' };
@@ -976,6 +1026,7 @@ sub _convert_related {
     }
     $rel->{relation} = \%relation if %relation;
     $related{$val} = $rel;
+    push @{$ctx->{sources}{relatedTo}{$val}}, $item if $ctx;
   }
 
   $card->{relatedTo} = \%related if %related;
@@ -994,7 +1045,7 @@ sub _convert_speak_to_as {
   if (my $items = $props->{pronouns}) {
     my %pronouns;
     for my $item (@$items) {
-      my $val = _decode_value($item->{value});
+      my $val = $item->{value};
       next unless defined $val && $val ne '';
       my $id = _prop_id($item, $ctx);
       my $obj = { '@type' => 'Pronouns', pronouns => $val };
@@ -1068,19 +1119,7 @@ sub jscontact_to_vcard {
   _unconvert_related(\@props, $card, $ctx);
   _unconvert_speak_to_as(\@props, $card, $ctx);
 
-  # Build vcard hash structure
-  my %by_name;
-  for my $prop (@props) {
-    $prop->{params} //= {};
-    push @{$by_name{$prop->{name}}}, $prop;
-  }
-
-  my $vcard = {
-    type       => 'vcard',
-    properties => \%by_name,
-  };
-
-  return _hash2vcard($vcard);
+  return _write_vcard(\@props);
 }
 
 ###############################################################################
@@ -1103,6 +1142,7 @@ sub _add_pref_params {
 
 sub _add_label {
   my ($out, $prop, $obj, $ctx) = @_;
+  return if $ctx->{no_labels};
   my $label = $obj->{label};
   return unless defined $label && $label ne '';
 
@@ -1548,155 +1588,751 @@ sub _unconvert_speak_to_as {
 # PATCH: Apply JSContact changes to an existing vCard with minimal disruption
 ###############################################################################
 
+# top-level Card property => the sub that patches it (filled in below)
+my %PATCHERS;
+
+# patch_vcard($original, $old_card, $new_card) applies the change from
+# $old_card to $new_card to the original vCard, line by line: a line for
+# an entry the change does not touch keeps its bytes, its group, its
+# folding and its place, and so does every line JSContact cannot say
+# anything about.  Returns $original itself when nothing changed; else
+# the patched vCard, as bytes if $original was bytes (as read from a
+# CardDAV server) and as characters if it was characters.  An original
+# that cannot be parsed gives the whole Card written afresh.
 sub patch_vcard {
   my ($original_vcard, $old_card, $new_card) = @_;
 
   # Determine which top-level JSContact properties changed
   my %changed = _diff_cards($old_card, $new_card);
-
-  # If nothing changed, return original
   return $original_vcard unless %changed;
 
-  # Parse the original vCard into its raw structure
-  my $parsed = eval { vcard2hash($original_vcard, multival => [qw(n adr org)]) };
-  return jscontact_to_vcard($new_card) unless $parsed;
+  my $out = _patch_vcard($original_vcard, $new_card, \%changed)
+         // jscontact_to_vcard($new_card);
+  return utf8::is_utf8($original_vcard) ? $out : encode_utf8($out);
+}
 
-  my $vcard = $parsed->{objects}[0];
-  return jscontact_to_vcard($new_card) unless $vcard && $vcard->{type} eq 'vcard';
+# The engine behind patch_vcard and jscontact_to_vcard(original => ...).
+# Reads $original (bytes or characters) itself, so the Card it diffs
+# against is exactly what the original says, with the vCard properties
+# each entry came from.  $only limits the patch to those top-level Card
+# properties.  Returns characters, or undef if the original cannot be
+# patched (it does not parse, or its lines cannot be matched to what
+# Text::VCardFast parsed).
+sub _patch_vcard {
+  my ($original, $new_card, $only) = @_;
 
-  my $props = $vcard->{properties};
+  my $text = _decode_input($original);
+  my ($old_card, $ctx, $props) = _read_vcard($text);
+  return undef unless $old_card;
 
-  # Detect which property names the original vCard actually uses, so we
-  # generate matching ones (e.g. X-ADDRESSBOOKSERVER-MEMBER vs MEMBER)
-  my %original_has;
+  my $P = _split_vcard($text, $props) or return undef;
+  $P->{ctx}   = $ctx;
+  $P->{props} = $props;
+  # vCard 3 (RFC 2426) or 2.1: lines patched in must be valid there
+  $P->{v3}    = ((_first_value($props, 'version') // '4.0') =~ /^[23]\./) ? 1 : 0;
+
+  my %changed = $only ? %$only : _diff_cards($old_card, $new_card);
+  for my $key (sort keys %changed) {
+    my $patcher = $PATCHERS{$key} or next;
+    $patcher->($P, $key, $old_card, $new_card);
+  }
+  _drop_orphan_groups($P);
+
+  return join '', map {
+    (@{$_->{before} // []}, ($_->{deleted} ? () : $_->{raw}), @{$_->{after} // []})
+  } @{$P->{lines}};
+}
+
+# --- The original, as lines ----------------------------------------------
+
+# Split a vCard into content lines, each keeping its raw text (folding and
+# line ending included), and match each property line of the first vCard
+# to the property Text::VCardFast parsed from it
+sub _split_vcard {
+  my ($text, $props) = @_;
+  return undef unless $text =~ /\n/;
+  my $eol = $text =~ /\r\n/ ? "\r\n" : "\n";
+
+  my @lines;
+  for my $phys (split /(?<=\n)/, $text) {
+    if (@lines && $phys =~ /^[ \t]/) { $lines[-1]{raw} .= $phys }
+    else                             { push @lines, { raw => $phys } }
+  }
+
+  my ($depth, $end, %by_name) = (0);
+  for my $i (0..$#lines) {
+    my $line = $lines[$i];
+    $line->{index} = $i;
+    (my $u = $line->{raw}) =~ s/\r?\n[ \t]//g;
+    $u =~ s/\r?\n\z//;
+    $line->{text} = $u;
+    next if $u =~ /^\s*$/;
+    if ($u =~ /^BEGIN:/i) { $depth++; next }
+    if ($u =~ /^END:/i) {
+      $end //= $i if $depth == 1;
+      $depth--;
+      next;
+    }
+    next unless $depth == 1 && !defined $end;
+    my ($name) = $u =~ /^([^;:]*)/;
+    my $lname = lc $name;
+    # as Text::VCardFast: the group is everything before the last dot
+    if ($lname =~ s/^(.+)\.(.*?)$/$2/) {
+      ($line->{group}) = $name =~ /^(.+)\./;
+    }
+    $line->{name} = $lname;
+    push @{$by_name{$lname}}, $line;
+  }
+  return undef unless defined $end;
+
+  my %line_of;
   for my $name (keys %$props) {
-    $original_has{lc $name} = 1 if $props->{$name} && @{$props->{$name}};
-  }
-
-  # For each changed property, regenerate just that part
-  # Map JSContact property names to the vCard properties they affect
-  my %jscontact_to_vcard_props = (
-    name          => [qw(fn n x-phonetic-first-name x-phonetic-middle-name x-phonetic-last-name)],
-    nicknames     => [qw(nickname)],
-    emails        => [qw(email)],
-    phones        => [qw(tel)],
-    addresses     => [qw(adr x-abadr)],
-    organizations => [qw(org)],
-    titles        => [qw(title role)],
-    anniversaries => [qw(bday anniversary deathdate x-abdate)],
-    notes         => [qw(note)],
-    onlineServices => [qw(impp socialprofile x-socialprofile x-aim x-icq x-msn x-yahoo x-jabber x-skype x-twitter x-google-talk x-skype-username)],
-    media         => [qw(photo logo sound)],
-    links         => [qw(url fburl contact-uri)],
-    calendars     => [qw(caluri)],
-    schedulingAddresses => [qw(caladruri)],
-    cryptoKeys    => [qw(key)],
-    directories   => [qw(source org-directory)],
-    keywords      => [qw(categories)],
-    members       => [qw(member x-addressbookserver-member)],
-    relatedTo     => [qw(related x-abrelatednames)],
-    speakToAs     => [qw(gramgender pronouns)],
-    preferredLanguages => [qw(lang)],
-    personalInfo  => [qw(expertise hobby interest)],
-    # Simple scalar properties
-    uid           => [qw(uid)],
-    kind          => [qw(kind x-addressbookserver-kind)],
-    prodId        => [qw(prodid)],
-    updated       => [qw(rev)],
-    created       => [qw(created)],
-    language      => [qw(language)],
-  );
-
-  for my $js_prop (keys %changed) {
-    my $vcard_names = $jscontact_to_vcard_props{$js_prop};
-    next unless $vcard_names;
-
-    # Remove old vCard properties for this JSContact property
-    # Also remove any associated X-ABLabel grouped properties
-    my %groups_to_remove;
-    for my $vname (@$vcard_names) {
-      for my $item (@{$props->{$vname} // []}) {
-        $groups_to_remove{$item->{group}} = 1 if $item->{group};
-      }
-      delete $props->{$vname};
-    }
-
-    # Remove orphaned X-ABLabel entries for removed groups
-    if (%groups_to_remove && $props->{'x-ablabel'}) {
-      $props->{'x-ablabel'} = [
-        grep { !$groups_to_remove{$_->{group} // ''} }
-          @{$props->{'x-ablabel'}}
-      ];
-      delete $props->{'x-ablabel'} unless @{$props->{'x-ablabel'}};
+    my $items = $props->{$name};
+    my $ls = $by_name{$name} // [];
+    return undef unless @$ls == @$items;
+    for my $i (0..$#$items) {
+      $line_of{refaddr $items->[$i]} = $ls->[$i];
+      $ls->[$i]{item} = $items->[$i];
     }
   }
-
-  # Generate the new properties from the new card; a new label must not
-  # take a group the original vCard uses
-  my $ctx = _seed_context(_new_context(), $props);
-  my @new_props;
-
-  # Generate only the changed properties
-  if ($changed{name})          { _unconvert_name(\@new_props, $new_card, $ctx) }
-  if ($changed{nicknames})     { _unconvert_nicknames(\@new_props, $new_card, $ctx) }
-  if ($changed{emails})        { _unconvert_emails(\@new_props, $new_card, $ctx) }
-  if ($changed{phones})        { _unconvert_phones(\@new_props, $new_card, $ctx) }
-  if ($changed{addresses})     { _unconvert_addresses(\@new_props, $new_card, $ctx) }
-  if ($changed{organizations}) { _unconvert_organizations(\@new_props, $new_card, $ctx) }
-  if ($changed{titles})        { _unconvert_titles(\@new_props, $new_card, $ctx) }
-  if ($changed{anniversaries}) { _unconvert_anniversaries(\@new_props, $new_card, $ctx) }
-  if ($changed{notes})         { _unconvert_notes(\@new_props, $new_card, $ctx) }
-  if ($changed{onlineServices}){ _unconvert_online_services(\@new_props, $new_card, $ctx) }
-  if ($changed{media})         { _unconvert_media(\@new_props, $new_card, $ctx) }
-  if ($changed{links})         { _unconvert_links(\@new_props, $new_card, $ctx) }
-  if ($changed{calendars})     { _unconvert_calendars(\@new_props, $new_card, $ctx) }
-  if ($changed{schedulingAddresses}) { _unconvert_scheduling_addresses(\@new_props, $new_card, $ctx) }
-  if ($changed{cryptoKeys})    { _unconvert_crypto_keys(\@new_props, $new_card, $ctx) }
-  if ($changed{directories})   { _unconvert_directories(\@new_props, $new_card, $ctx) }
-  if ($changed{keywords})      { _unconvert_keywords(\@new_props, $new_card, $ctx) }
-  if ($changed{members}) {
-    if ($original_has{'x-addressbookserver-member'}) {
-      _unconvert_members_apple(\@new_props, $new_card, $ctx);
-    } else {
-      _unconvert_members(\@new_props, $new_card, $ctx);
-    }
-  }
-  if ($changed{relatedTo})     { _unconvert_related(\@new_props, $new_card, $ctx) }
-  if ($changed{speakToAs})     { _unconvert_speak_to_as(\@new_props, $new_card, $ctx) }
-  if ($changed{preferredLanguages}) { _unconvert_preferred_languages(\@new_props, $new_card, $ctx) }
-  if ($changed{personalInfo})  { _unconvert_personal_info(\@new_props, $new_card, $ctx) }
-
-  # Simple scalar properties — use Apple property names when original has them
-  for my $spec (['uid', 'uid'], ['prodId', 'prodid'],
-                 ['updated', 'rev'], ['created', 'created'], ['language', 'language']) {
-    my ($js, $vc) = @$spec;
-    if ($changed{$js}) {
-      if (defined $new_card->{$js} && $new_card->{$js} ne '') {
-        push @new_props, { name => $vc, value => $new_card->{$js}, params => {} };
-      }
-    }
-  }
-  if ($changed{kind}) {
-    if (defined $new_card->{kind} && $new_card->{kind} ne '') {
-      my $propname = $original_has{'x-addressbookserver-kind'} ? 'x-addressbookserver-kind' : 'kind';
-      push @new_props, { name => $propname, value => $new_card->{kind}, params => {} };
-    }
+  for my $name (keys %by_name) {
+    return undef unless $props->{$name};
   }
 
-  # Merge new properties into the existing vCard
-  for my $prop (@new_props) {
-    $prop->{params} //= {};
-    push @{$props->{$prop->{name}}}, $prop;
-  }
-
-  return _hash2vcard($vcard);
+  return {
+    lines   => \@lines,
+    eol     => $eol,
+    end     => $lines[$end],
+    by_name => \%by_name,
+    line_of => \%line_of,
+  };
 }
 
-# A vCard as Text::VCardFast parses it, written again
-sub _hash2vcard {
-  my ($vcard) = @_;
-  return _write_vcard([ map { @$_ } @{$vcard->{properties}}{sort keys %{$vcard->{properties}}} ]);
+sub _lines_of_items {
+  my ($P, $items) = @_;
+  return sort { $a->{index} <=> $b->{index} }
+         grep { defined && !$_->{deleted} }
+         map { $P->{line_of}{refaddr $_} } @{$items // []};
 }
+
+sub _lines_named {
+  my ($P, @names) = @_;
+  return sort { $a->{index} <=> $b->{index} }
+         grep { !$_->{deleted} }
+         map { @{$P->{by_name}{$_} // []} } @names;
+}
+
+sub _group_lines {
+  my ($P, $group) = @_;
+  return grep { defined $_->{group} && lc $_->{group} eq lc $group && !$_->{deleted} }
+         @{$P->{lines}};
+}
+
+# --- Editing lines -------------------------------------------------------
+
+sub _set_line {
+  my ($P, $line, $text) = @_;
+  return if $text eq $line->{text};
+  $line->{text} = $text;
+  $line->{raw}  = _fold($text, $P->{eol});
+}
+
+sub _delete_line {
+  my ($P, $line) = @_;
+  return unless $line;
+  $line->{deleted} = 1;
+  $P->{touched_groups}{lc $line->{group}} = 1 if defined $line->{group};
+}
+
+# Insert content lines after $anchor (and the lines of its group that
+# follow it), or before END:VCARD
+sub _insert {
+  my ($P, $anchor, @texts) = @_;
+  my $at = $P->{end};
+  my $where = 'before';
+  if ($anchor) {
+    my $i = $anchor->{index};
+    my $g = $anchor->{group} // $anchor->{new_group};
+    my $lines = $P->{lines};
+    while (defined $g && $i < $#$lines && defined $lines->[$i+1]{group}
+           && lc $lines->[$i+1]{group} eq lc $g) {
+      $i++;
+    }
+    ($at, $where) = ($lines->[$i], 'after');
+  }
+  push @{$at->{$where}}, map { _fold($_, $P->{eol}) } @texts;
+}
+
+# A group left with nothing but annotations (a label, an Apple country
+# code, a GEO or TZ for an address) once its property is deleted goes too
+my %ANNOTATION = map { $_ => 1 } qw(x-ablabel x-abadr geo tz);
+
+sub _drop_orphan_groups {
+  my ($P) = @_;
+  for my $g (sort keys %{$P->{touched_groups} // {}}) {
+    my @live = _group_lines($P, $g);
+    next if grep { !$ANNOTATION{$_->{name}} } @live;
+    _delete_line($P, $_) for @live;
+  }
+}
+
+# --- Writing an entry into a line ----------------------------------------
+
+# A content line split into its name (group included, as written), its
+# parameters (each as written, with its values decoded) and its value
+sub _parse_line {
+  my ($text) = @_;
+  $text =~ /\G([^;:]*)/gc;
+  my $name = $1;
+  my @tokens;
+  while ($text =~ /\G(;([^;:=]*)(?:=((?:"[^"]*"|[^";:])*))?)/gc) {
+    my ($raw, $pname, $pval) = ($1, $2, $3);
+    my $tok = { raw => $raw, rawname => $pname };
+    if (defined $pval) {
+      $tok->{name} = lc $pname;
+      $tok->{values} = [ map {
+        my $r = $_;
+        (my $v = $r) =~ s/^"(.*)"$/$1/s;
+        $v =~ s/\^([n^'])/$1 eq 'n' ? "\n" : $1 eq '^' ? '^' : '"'/ge;
+        { raw => $r, val => $v };
+      } $pval =~ /((?:"[^"]*"|[^,"])+)/g ];
+    }
+    else {
+      # vCard 2.1: a bare TYPE value
+      $tok->{name}   = 'type';
+      $tok->{bare}   = 1;
+      $tok->{values} = [ { raw => $pname, val => $pname } ];
+    }
+    push @tokens, $tok;
+  }
+  return undef unless $text =~ /\G:/gc;
+  return { name => $name, tokens => \@tokens, value => substr($text, pos $text) };
+}
+
+# The parameters the reader interprets.  Any other parameter on a line is
+# kept as it is; so is a TYPE value the reader does not interpret.
+my %KNOWN_PARAM = map { $_ => 1 } qw(
+  prop-id value type pref label geo tz cc mediatype service-type username
+  x-service-type x-user level index created author author-name sort-as
+  encoding
+), map { "x-$_" } qw(label geo tz cc mediatype sort-as level index created
+  author author-name);
+my %KNOWN_TYPE = map { $_ => 1 } qw(home work pref cell voice fax video pager
+  text textphone);
+# properties whose every TYPE value is the reader's (a media format, a
+# relation)
+my %ALL_TYPES_KNOWN = map { $_ => 1 } qw(photo logo sound related);
+
+sub _param_key {
+  my ($name, $val) = @_;
+  $name = lc $name;
+  return "$name\0" . ($name =~ /^(?:type|value|encoding)$/ ? lc $val : $val);
+}
+
+# The line for $prop written over the original $line of the same name:
+# the original's name, group and parameters stay as written, except the
+# known parameters the new property no longer has
+sub _merged_text {
+  my ($P, $line, $prop) = @_;
+  my $parsed = _parse_line($line->{text}) or return undef;
+  my $params = $prop->{params} // {};
+  my $lname  = lc $prop->{name};
+
+  my (@want, %want);
+  for my $n (_param_order($params)) {
+    my $vals = $params->{$n};
+    for my $v (ref $vals eq 'ARRAY' ? @$vals : ($vals)) {
+      next unless defined $v;
+      my $k = _param_key($n, _clean_vcard_text($v));
+      push @want, [$n, $v, $k];
+      $want{$k}++;
+    }
+  }
+
+  my $out = $parsed->{name};
+  $out = "$line->{new_group}.$out" if $line->{new_group};
+  for my $tok (@{$parsed->{tokens}}) {
+    my $n = $tok->{name};
+    my $keep_all = !$KNOWN_PARAM{$n}
+      # a VALUE=date (say) stays unless the new value says otherwise
+      || ($n eq 'value' && !$params->{value}
+          && !grep { $_->{val} =~ /^(?:uri|text)$/i } @{$tok->{values}});
+    if ($keep_all) { $out .= $tok->{raw}; next }
+    my (@kept, $dropped);
+    for my $v (@{$tok->{values}}) {
+      my $k = _param_key($n, $v->{val});
+      if ($want{$k}) {
+        $want{$k}--;
+        push @kept, $v;
+      }
+      elsif ($n eq 'type' && !$ALL_TYPES_KNOWN{$lname} && !$KNOWN_TYPE{lc $v->{val}}) {
+        push @kept, $v;
+      }
+      else {
+        $dropped = 1;
+      }
+    }
+    if (!$dropped) { $out .= $tok->{raw} }
+    elsif (@kept) {
+      $out .= $tok->{bare} ? join('', map { ";$_->{raw}" } @kept)
+                           : ";$tok->{rawname}=" . join(',', map { $_->{raw} } @kept);
+    }
+  }
+  for my $w (@want) {
+    my ($n, $v, $k) = @$w;
+    next unless $want{$k};
+    $want{$k}--;
+    $out .= ';' . uc($n) . '=' . _param_value($v);
+  }
+  return $out . ':' . _value_text($prop);
+}
+
+# Write $prop over the original $line: merged when it is the same vCard
+# property, else replaced, keeping the line's group (and so its label)
+sub _replace_line {
+  my ($P, $line, $prop) = @_;
+  my $text;
+  $text = _merged_text($P, $line, $prop) if lc $prop->{name} eq $line->{name};
+  unless (defined $text) {
+    $prop->{group} //= $line->{group} // $line->{new_group};
+    $text = _prop_line($prop);
+  }
+  _set_line($P, $line, $text);
+}
+
+# A vCard property that has an Apple or older form keeps the form the
+# original used
+my %KEEP_NAME = (
+  'x-abdate'        => { anniversary => 1 },
+  'x-socialprofile' => { impp => 1 },
+  'socialprofile'   => { impp => 1 },
+);
+
+# Make a generated property fit the original: its property name, and the
+# vCard 3 syntax if the original is vCard 3
+sub _fit {
+  my ($P, $prop, $line) = @_;
+  $prop->{name} = $line->{name}
+    if $line && $KEEP_NAME{$line->{name}} && $KEEP_NAME{$line->{name}}{lc $prop->{name}};
+  _to_v3($prop) if $P->{v3};
+  return $prop;
+}
+
+# vCard 4 parameters with no vCard 3 form keep their value as X- (RFC
+# 2426 S4 allows x-name parameters); the reader reads them back
+my @V4_ONLY_PARAM = qw(label geo tz cc mediatype sort-as level index created
+  author author-name);
+
+# Rewrite a property as the vCard 4 writer made it into vCard 3 (RFC 2426)
+# syntax: no PROP-ID; PREF=1 becomes TYPE=pref; an inline data: URI is
+# ENCODING=b with the format as TYPE; RFC 9554 SERVICE-TYPE and USERNAME
+# are the X-SERVICE-TYPE and X-USER that Apple writes; KIND and MEMBER
+# are Apple's X-ADDRESSBOOKSERVER-*; a date without a year uses Apple's
+# 1604.  A property defined only for vCard 4 (RELATED, GENDER, LANG, ...)
+# keeps its name: RFC 2425 allows any registered name, and a vCard 3
+# reader skips one it does not know.
+sub _to_v3 {
+  my ($prop) = @_;
+  my $p = $prop->{params} //= {};
+  my $name = lc $prop->{name};
+
+  delete $p->{'prop-id'};
+  if (my $pref = delete $p->{pref}) {
+    push @{$p->{type}}, 'pref'
+      if grep { defined $_ && looks_like_number($_) && $_ == 1 } ref $pref ? @$pref : ($pref);
+  }
+
+  if ($name =~ /^(?:photo|logo|sound)$/) {
+    my $mt = delete $p->{mediatype};
+    if (($prop->{value} // '') =~ m{^data:([^;,]*)(?:;[^;,]*)*;base64,(.*)\z}si) {
+      my ($type, $b64) = ($1, $2);
+      $type = $mt->[0] if $type eq '' && $mt;
+      $type =~ s{.*/}{} if defined $type;
+      $p->{encoding} = ['b'];
+      $p->{type} = [$type] if defined $type && $type ne '';
+      $prop->{value} = $b64;
+    }
+    else {
+      $p->{value} = ['uri'];
+    }
+  }
+  $p->{type} = [ map { uc } @{$p->{type}} ] if $p->{type};
+
+  $p->{'x-service-type'} = delete $p->{'service-type'} if $p->{'service-type'};
+  $p->{'x-user'}         = delete $p->{username}       if $p->{username};
+  for my $n (@V4_ONLY_PARAM) {
+    $p->{"x-$n"} = delete $p->{$n} if exists $p->{$n};
+  }
+
+  if ($name eq 'kind') {
+    $prop->{name} = 'x-addressbookserver-kind';
+  }
+  elsif ($name eq 'member') {
+    $prop->{name} = 'x-addressbookserver-member';
+    $prop->{value} = "urn:uuid:$prop->{value}" unless $prop->{value} =~ /^urn:uuid:/i;
+  }
+  elsif ($name =~ /^(?:bday|anniversary|deathdate|x-abdate)$/
+         && ($prop->{value} // '') =~ /^--(\d\d)(\d\d)$/) {
+    $prop->{value} = "1604-$1-$2";
+  }
+  return $prop;
+}
+
+# --- Labels ---------------------------------------------------------------
+
+sub _label_text {
+  my ($group, $label) = @_;
+  return "$group.X-ABLabel:" . _escape_text($label);
+}
+
+# Give $line the label $new (none if undef or empty): the X-ABLabel of its
+# group is rewritten, added (with a new group if the line has none) or
+# deleted
+sub _set_label {
+  my ($P, $line, $prop, $new) = @_;
+  $new = undef if defined $new && (ref $new || $new eq '');
+  my $group = $line->{group} // $line->{new_group};
+  my ($label_line) = defined $group
+    ? grep { $_->{name} && $_->{name} eq 'x-ablabel' } _group_lines($P, $group) : ();
+  if (!defined $new) {
+    _delete_line($P, $label_line) if $label_line;
+    return;
+  }
+  if ($label_line) {
+    my $pl = _parse_line($label_line->{text});
+    my $head = $pl ? $pl->{name} . join('', map { $_->{raw} } @{$pl->{tokens}})
+                   : "$group.X-ABLabel";
+    _set_line($P, $label_line, "$head:" . _escape_text($new));
+    return;
+  }
+  unless (defined $group) {
+    $group = _alloc_group($P->{ctx});
+    $line->{new_group} = $group;
+  }
+  $prop->{group} = $group if $prop;
+  push @{$line->{after}}, _fold(_label_text($group, $new), $P->{eol});
+}
+
+sub _patch_label {
+  my ($P, $line, $prop, $old, $new) = @_;
+  $_ = (defined $_ && !ref $_ && $_ ne '') ? $_ : undef for my ($o, $n) = ($old, $new);
+  return if !defined $o && !defined $n;
+  return if defined $o && defined $n && $o eq $n;
+  _set_label($P, $line, $prop, $n);
+}
+
+# --- Patchers, one per top-level Card property ----------------------------
+
+sub _same {
+  my ($x, $y) = @_;
+  state $json = JSON->new->canonical->allow_nonref->allow_blessed->convert_blessed;
+  return $json->encode([$x]) eq $json->encode([$y]);
+}
+
+# The maps whose entries the reader labels from an X-ABLabel
+my %LABELLED = map { $_ => 1 } qw(emails phones addresses onlineServices media
+  links calendars schedulingAddresses cryptoKeys directories);
+
+my %MAP_WRITERS = (
+  nicknames           => \&_unconvert_nicknames,
+  emails              => \&_unconvert_emails,
+  phones              => \&_unconvert_phones,
+  addresses           => \&_unconvert_addresses,
+  organizations       => \&_unconvert_organizations,
+  titles              => \&_unconvert_titles,
+  anniversaries       => \&_unconvert_anniversaries,
+  notes               => \&_unconvert_notes,
+  onlineServices      => \&_unconvert_online_services,
+  media               => \&_unconvert_media,
+  links               => \&_unconvert_links,
+  calendars           => \&_unconvert_calendars,
+  schedulingAddresses => \&_unconvert_scheduling_addresses,
+  cryptoKeys          => \&_unconvert_crypto_keys,
+  directories         => \&_unconvert_directories,
+  preferredLanguages  => \&_unconvert_preferred_languages,
+  personalInfo        => \&_unconvert_personal_info,
+);
+
+# Patch a map of the Card entry by entry: an unchanged entry keeps its
+# line; a changed one is written over its line; a removed one loses its
+# line; a new one is added after the lines of the same map.  $gen makes
+# the vCard property of one entry (with no label: labels are patched
+# here); $hook may adjust it against the original line first.
+sub _patch_map {
+  my ($P, $key, $old, $new, $gen, $hook) = @_;
+  $old = {} unless ref $old eq 'HASH';
+  $new = {} unless ref $new eq 'HASH';
+  my $sources = $P->{ctx}{sources}{$key} // {};
+  my $labelled = $LABELLED{$key};
+
+  my @all = _lines_of_items($P, [ map { @$_ } values %$sources ]);
+  my $anchor = $all[-1];
+
+  my %placed;
+  for my $id (sort keys %$old) {
+    my @lines = _lines_of_items($P, $sources->{$id});
+    next unless @lines;
+    $placed{$id} = 1;
+    my $entry = $new->{$id};
+    if (ref $entry ne 'HASH') {
+      _delete_line($P, $_) for @lines;
+      next;
+    }
+    next if _same($old->{$id}, $entry);
+    my $line = pop @lines;
+    _delete_line($P, $_) for @lines;
+    my ($prop) = $gen->($id, $entry);
+    unless ($prop) {
+      _delete_line($P, $line);
+      next;
+    }
+    $hook->($P, $line, $prop, $old->{$id}, $entry) if $hook;
+    _fit($P, $prop, $line);
+    _patch_label($P, $line, $prop, $old->{$id}{label}, $entry->{label}) if $labelled;
+    _replace_line($P, $line, $prop);
+  }
+
+  for my $id (sort keys %$new) {
+    next if $placed{$id};
+    my $entry = $new->{$id};
+    next unless ref $entry eq 'HASH';
+    my ($prop) = $gen->($id, $entry) or next;
+    _fit($P, $prop);
+    my $label = $labelled ? $entry->{label} : undef;
+    my @texts;
+    if (defined $label && !ref $label && $label ne '') {
+      $prop->{group} = _alloc_group($P->{ctx});
+      @texts = (_prop_line($prop), _label_text($prop->{group}, $label));
+    }
+    else {
+      @texts = (_prop_line($prop));
+    }
+    _insert($P, $anchor, @texts);
+  }
+}
+
+# One entry of a map as the writer makes it, without its label
+sub _map_writer {
+  my ($P, $key) = @_;
+  my $ctx = $P->{ctx};
+  return sub {
+    my ($id, $entry) = @_;
+    my @out;
+    local $ctx->{no_labels} = 1;
+    $MAP_WRITERS{$key}->(\@out, { $key => { $id => $entry } }, $ctx);
+    return @out;
+  };
+}
+
+# An Apple address keeps its country code, coordinates and time zone in
+# lines of its group (X-ABADR, GEO, TZ) rather than in parameters: those
+# lines are updated instead
+sub _address_siblings {
+  my ($P, $line, $prop, $old, $new) = @_;
+  my $group = $line->{group} // return;
+  my $item = $line->{item} // {};
+  for my $spec ([cc => 'x-abadr', 'countryCode'], [geo => 'geo', 'coordinates'],
+                [tz => 'tz', 'timeZone']) {
+    my ($param, $sib_name, $field) = @$spec;
+    next if defined $item->{params}{$param};
+    my ($sib) = grep { $_->{name} && $_->{name} eq $sib_name } _group_lines($P, $group);
+    next unless $sib;
+    delete $prop->{params}{$param};
+    next if _same($old->{$field}, $new->{$field});
+    my $val = $new->{$field};
+    if (!defined $val || ref $val || $val eq '') {
+      _delete_line($P, $sib);
+      next;
+    }
+    my $pl = _parse_line($sib->{text}) or next;
+    my $head = $pl->{name} . join('', map { $_->{raw} } @{$pl->{tokens}});
+    my $text = $sib_name eq 'geo' && $val =~ /^[a-z][a-z0-9+.-]*:/i ? _uri_text($val) : _escape_text($val);
+    _set_line($P, $sib, "$head:$text");
+  }
+}
+
+# One vCard property, by name: the first line is written over, or every
+# line deleted, or one added before END:VCARD.  With $all, the other lines
+# of that name go too (the reader merges them all).
+sub _patch_single {
+  my ($P, $names, $prop, $all) = @_;
+  my @lines = _lines_named($P, @$names);
+  unless ($prop) {
+    _delete_line($P, $_) for @lines;
+    return;
+  }
+  my $first = shift @lines;
+  _fit($P, $prop, $first);
+  if ($first) {
+    _replace_line($P, $first, $prop);
+    if ($all) { _delete_line($P, $_) for @lines }
+  }
+  else {
+    _insert($P, undef, _prop_line($prop));
+  }
+}
+
+sub _patch_name {
+  my ($P, $key, $old_card, $new_card) = @_;
+  my $o = ref $old_card->{name} eq 'HASH' ? $old_card->{name} : {};
+  my $n = ref $new_card->{name} eq 'HASH' ? $new_card->{name} : {};
+
+  my @gen;
+  _unconvert_name(\@gen, { name => $n }, $P->{ctx});
+  my ($fn) = grep { $_->{name} eq 'fn' } @gen;
+  my ($nn) = grep { $_->{name} eq 'n' } @gen;
+
+  # FN is the full name, or made from the components when there is none
+  _patch_single($P, ['fn'], $fn)
+    if !_same($o->{full}, $n->{full})
+    || (!defined $n->{full} && !_same($o->{components}, $n->{components}));
+  _patch_single($P, ['n'], $nn)
+    unless _same([$o->{components}, $o->{sortAs}], [$n->{components}, $n->{sortAs}]);
+
+  # TODO(registry): phoneticComponents are read from X-PHONETIC-*-NAME but
+  # the writer has no form for them yet (_unconvert_name), so a change to
+  # them is not patched; the X-PHONETIC-* lines are left as they are.
+  _patch_single($P, [qw(x-phonetic-first-name x-phonetic-middle-name x-phonetic-last-name)], undef)
+    unless %$n;
+}
+
+sub _patch_keywords {
+  my ($P, $key, $old_card, $new_card) = @_;
+  my @gen;
+  _unconvert_keywords(\@gen, $new_card, $P->{ctx});
+  _patch_single($P, ['categories'], $gen[0], 1);
+}
+
+sub _patch_members {
+  my ($P, $key, $old_card, $new_card) = @_;
+  my $o = ref $old_card->{members} eq 'HASH' ? $old_card->{members} : {};
+  my $n = ref $new_card->{members} eq 'HASH' ? $new_card->{members} : {};
+  my $sources = $P->{ctx}{sources}{members} // {};
+  my $apple = $P->{v3} || _lines_named($P, 'x-addressbookserver-member');
+  my @all = _lines_named($P, qw(member x-addressbookserver-member));
+  my $anchor = $all[-1];
+
+  for my $m (sort keys %$o) {
+    next if $n->{$m};
+    _delete_line($P, $_) for _lines_of_items($P, $sources->{$m});
+  }
+  for my $m (sort keys %$n) {
+    next if $o->{$m} || !$n->{$m};
+    my @gen;
+    my $writer = $apple ? \&_unconvert_members_apple : \&_unconvert_members;
+    $writer->(\@gen, { members => { $m => JSON::true } }, $P->{ctx});
+    _insert($P, $anchor, map { _prop_line(_fit($P, $_)) } @gen);
+  }
+}
+
+# The X-ABLabel that says a relation to Apple (the reader maps it back)
+my %RELATION_LABEL = (spouse => 'Spouse', parent => 'Parent', child => 'Child',
+                      friend => 'Friend');
+
+sub _patch_related {
+  my ($P, $key, $old_card, $new_card) = @_;
+  my $o = ref $old_card->{relatedTo} eq 'HASH' ? $old_card->{relatedTo} : {};
+  my $n = ref $new_card->{relatedTo} eq 'HASH' ? $new_card->{relatedTo} : {};
+  my $sources = $P->{ctx}{sources}{relatedTo} // {};
+  my @all = _lines_named($P, qw(related x-abrelatednames));
+  my $anchor = $all[-1];
+  my $gen = sub {
+    my ($k, $rel) = @_;
+    my @out;
+    _unconvert_related(\@out, { relatedTo => { $k => $rel } }, $P->{ctx});
+    return $out[0];
+  };
+
+  my %placed;
+  for my $k (sort keys %$o) {
+    my @lines = _lines_of_items($P, $sources->{$k});
+    next unless @lines;
+    $placed{$k} = 1;
+    if (ref $n->{$k} ne 'HASH') {
+      _delete_line($P, $_) for @lines;
+      next;
+    }
+    next if _same($o->{$k}, $n->{$k});
+    my $line = pop @lines;
+    _delete_line($P, $_) for @lines;
+    if ($line->{name} eq 'x-abrelatednames') {
+      # Apple says the relation in the label
+      my @rel = grep { $n->{$k}{relation}{$_} } sort keys %{$n->{$k}{relation} // {}};
+      if (!@rel) { _set_label($P, $line, undef, undef); next }
+      if (@rel == 1 && $RELATION_LABEL{$rel[0]}) {
+        _set_label($P, $line, undef, "_\$!<$RELATION_LABEL{$rel[0]}>!\$_");
+        next;
+      }
+    }
+    _replace_line($P, $line, _fit($P, $gen->($k, $n->{$k}), $line));
+  }
+  for my $k (sort keys %$n) {
+    next if $placed{$k} || ref $n->{$k} ne 'HASH';
+    _insert($P, $anchor, _prop_line(_fit($P, $gen->($k, $n->{$k}))));
+  }
+}
+
+sub _patch_speak_to_as {
+  my ($P, $key, $old_card, $new_card) = @_;
+  my $o = ref $old_card->{speakToAs} eq 'HASH' ? $old_card->{speakToAs} : {};
+  my $n = ref $new_card->{speakToAs} eq 'HASH' ? $new_card->{speakToAs} : {};
+  unless (_same($o->{grammaticalGender}, $n->{grammaticalGender})) {
+    my $gg = $n->{grammaticalGender};
+    _patch_single($P, ['gramgender'],
+      defined $gg && !ref $gg && $gg ne '' ? { name => 'gramgender', value => $gg, params => {} } : undef);
+  }
+  my $ctx = $P->{ctx};
+  _patch_map($P, 'speakToAs', $o->{pronouns}, $n->{pronouns}, sub {
+    my ($id, $entry) = @_;
+    my @out;
+    _unconvert_speak_to_as(\@out, { speakToAs => { pronouns => { $id => $entry } } }, $ctx);
+    return @out;
+  });
+}
+
+sub _scalar_patcher {
+  my ($vname) = @_;
+  return sub {
+    my ($P, $key, $old_card, $new_card) = @_;
+    my $v = $new_card->{$key};
+    _patch_single($P, [$vname],
+      defined $v && !ref $v && $v ne '' ? { name => $vname, value => $v, params => {} } : undef);
+  };
+}
+
+sub _patch_kind {
+  my ($P, $key, $old_card, $new_card) = @_;
+  my $v = $new_card->{kind};
+  my @names = qw(kind x-addressbookserver-kind);
+  my ($line) = _lines_named($P, @names);
+  $v = undef if defined $v && (ref $v || $v eq '');
+  # Apple writes no kind for an individual
+  $v = undef if defined $v && $v eq 'individual' && ($P->{v3} || ($line && $line->{name} ne 'kind'));
+  my $name = $line ? $line->{name} : 'kind';
+  _patch_single($P, \@names, defined $v ? { name => $name, value => $v, params => {} } : undef);
+}
+
+%PATCHERS = (
+  name        => \&_patch_name,
+  keywords    => \&_patch_keywords,
+  members     => \&_patch_members,
+  relatedTo   => \&_patch_related,
+  speakToAs   => \&_patch_speak_to_as,
+  kind        => \&_patch_kind,
+  uid         => _scalar_patcher('uid'),
+  prodId      => _scalar_patcher('prodid'),
+  updated     => _scalar_patcher('rev'),
+  created     => _scalar_patcher('created'),
+  language    => _scalar_patcher('language'),
+  (map {
+    my $key = $_;
+    ($key => sub {
+      my ($P, $k, $old_card, $new_card) = @_;
+      _patch_map($P, $key, $old_card->{$key}, $new_card->{$key}, _map_writer($P, $key),
+                 $key eq 'addresses' ? \&_address_siblings : undef);
+    });
+  } keys %MAP_WRITERS),
+);
 
 ###############################################################################
 # WRITING: content lines, byte for byte the same for the same input
@@ -1761,10 +2397,7 @@ sub _params_text {
   my ($params) = @_;
   return '' unless $params && %$params;
   my $text = '';
-  my @names = sort {
-    ($PARAM_ORDER{$a} // 1000) <=> ($PARAM_ORDER{$b} // 1000) || $a cmp $b
-  } keys %$params;
-  for my $name (@names) {
+  for my $name (_param_order($params)) {
     my $vals = $params->{$name};
     for my $val (ref $vals eq 'ARRAY' ? @$vals : ($vals)) {
       next unless defined $val;
@@ -1772,6 +2405,13 @@ sub _params_text {
     }
   }
   return $text;
+}
+
+sub _param_order {
+  my ($params) = @_;
+  return sort {
+    ($PARAM_ORDER{$a} // 1000) <=> ($PARAM_ORDER{$b} // 1000) || $a cmp $b
+  } keys %$params;
 }
 
 # RFC 6868 caret encoding; quoted when it holds a separator or space
@@ -1803,7 +2443,6 @@ sub _value_text {
     } @$values;
   }
   return _uri_text($prop->{value}) if _is_uri_value($prop);
-  return $prop->{raw_value} if defined $prop->{raw_value};
   return _escape_text($prop->{value});
 }
 

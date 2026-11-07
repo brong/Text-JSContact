@@ -30,7 +30,6 @@ sub load {
 }
 
 my $LABEL = 'label only written for emails and phones (_add_label: lib/Text/JSContact.pm:1161,1190)';
-my $UTF8  = 'UTF-8 not decoded on read: %s';
 
 # "file key" => reason
 my %TODO_KEY = (
@@ -42,13 +41,6 @@ my %TODO_KEY = (
   'labels.json calendars'                => $LABEL,
   'phonetic.json name'                   => 'phoneticComponents never written: _unconvert_name ignores them (lib:1088-1136)',
   'custom-anniversary.json anniversaries'=> 'an Anniversary kind other than birth/wedding/death is written as ANNIVERSARY (lib:1286), read back as wedding (lib:531)',
-  'utf8.json addresses'      => sprintf($UTF8, 'ADR LABEL param (lib:423)'),
-  'utf8.json emails'         => sprintf($UTF8, 'EMAIL (lib:323)'),
-  'utf8.json keywords'       => sprintf($UTF8, 'CATEGORIES (lib:854)'),
-  'utf8.json notes'          => sprintf($UTF8, 'NOTE AUTHOR-NAME param (lib:587)'),
-  'utf8.json onlineServices' => sprintf($UTF8, 'IMPP USERNAME param and value (lib:610,618)'),
-  'utf8.json organizations'  => sprintf($UTF8, 'ORG name (lib:472)'),
-  'utf8.json relatedTo'      => sprintf($UTF8, 'RELATED (lib:891)'),
   'rfc9553-only.json addresses'     => 'AddressComponent kinds beyond the 7 ADR fields (number, ...) dropped (lib:1199-1202), and contexts other than private/work (billing) dropped (lib:1045-1052)',
   'rfc9553-only.json calendars'     => 'Calendar kind not read or written: CALURI gets no kind (lib:775), freeBusy is read from FBURL into links (lib:768), written as CALURI (lib:1388)',
   'rfc9553-only.json directories'   => 'Directory listAs (INDEX) neither read (lib:739-762) nor written (lib:1399-1413)',

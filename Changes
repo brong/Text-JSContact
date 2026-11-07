@@ -16,6 +16,27 @@ Revision history for Perl extension Text::JSContact
 	  A label group allocated by patch_vcard skips every group the
 	  original vCard has, so a new label no longer takes item1 from a
 	  property that already has one
+	- patch_vcard patches the original line by line instead of
+	  re-serialising the whole vCard: a line for an entry the change does
+	  not touch keeps its bytes, group, folding and place, as does every
+	  line JSContact cannot represent.  A changed entry is written over
+	  its own line, keeping its group, the parameters the reader does not
+	  interpret and the TYPE values it does not map; a removed entry takes
+	  its line, its label and the rest of its group with it; a new entry
+	  goes after the lines of the same map.  Labels are patched for every
+	  property the reader labels, Apple addresses keep X-ABADR/GEO/TZ in
+	  their group, an Apple relation change is written as its X-ABLabel,
+	  and X-ABDATE and X-SOCIALPROFILE keep their names
+	- patch_vcard keeps a vCard 3 card vCard 3: lines patched into it have
+	  no PROP-ID, TYPE=pref for PREF=1, ENCODING=b for an inline data: URI,
+	  X-SERVICE-TYPE/X-USER, Apple's X-ADDRESSBOOKSERVER-KIND/-MEMBER,
+	  X- forms of the other vCard 4 parameters (which the reader now also
+	  reads) and 1604 for a date without a year
+	- UTF-8: a vCard is decoded once, before parsing, so every value is
+	  characters (the ORG name, EMAIL, CATEGORIES, IMPP, RELATED and
+	  several parameters were left as bytes and double-encoded when
+	  written), and patch_vcard returns bytes for bytes and characters for
+	  characters instead of splicing characters into bytes
 
 0.05  2026-11-07
 	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes

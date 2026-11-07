@@ -35,7 +35,6 @@ my $LABEL  = 'X-ABLabel only written for emails and phones (_add_label: lib/Text
 my $ABDATE = 'custom X-ABDATE label read as an Anniversary kind (lib:558), written as ANNIVERSARY (lib:1286), read back as wedding (lib:531)';
 my $KIND   = 'KIND:individual is not written (lib:986), so it does not come back';
 my $PHON   = 'phoneticComponents never written: _unconvert_name ignores them (lib:1088-1136)';
-my $UTF8   = 'UTF-8 decoding inconsistent: ORG name (lib:472), EMAIL (lib:323) not decoded, so the written card double-encodes them';
 
 # "file key" => reason: a top-level Card property that does not survive
 # read -> write -> read
@@ -45,8 +44,6 @@ my %TODO_KEY = (
   'apple-ios-person.vcf name'           => $PHON,
   'apple-ios-person.vcf onlineServices' => $LABEL,
   'apple-company.vcf addresses'         => $LABEL,
-  'apple-company.vcf emails'            => $UTF8,
-  'apple-company.vcf organizations'     => $UTF8,
   'google-export.vcf anniversaries'     => $ABDATE,
   'google-export.vcf links'             => $LABEL,
   'google-export.vcf onlineServices'    => $LABEL,
@@ -179,7 +176,6 @@ like(jscontact_to_vcard($cyrus), qr/^EMAIL;.*PROP-ID=e1/m, 'Cyrus: map key writt
   my ($em)  = values %{$co->{emails}};
   is($co->{name}{full}, "Caf\x{e9} M\x{fc}ller GmbH", 'UTF-8: FN decoded');
   is($org->{units}[0]{name}, "K\x{fc}che", 'UTF-8: ORG unit decoded');
-  local $TODO = $UTF8;
   is($org->{name}, "Caf\x{e9} M\x{fc}ller GmbH", 'UTF-8: ORG name decoded');
   is($em->{address}, "k\x{fc}che\@caf\x{e9}.example", 'UTF-8: EMAIL decoded');
 }

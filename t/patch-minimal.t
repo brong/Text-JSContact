@@ -3,8 +3,7 @@
 # patch_vcard must change only what the Card change asks for: a vCard from
 # Apple or Google carries grouped lines, labels, X- properties and vendor
 # parameters that JSContact cannot represent, and a client that saves one
-# edited email must not lose or rewrite them.  Known failures are TODO with
-# the lib line responsible.
+# edited email must not lose or rewrite them.
 
 use strict;
 use warnings;
@@ -60,9 +59,6 @@ sub find_id {
   return $id;
 }
 
-my $REWRITE = 'patch_vcard re-serialises the whole vCard (_hash2vcard, lib:1652): properties reordered, group and parameter names upper-cased, lines refolded';
-my $V4IN3   = 'patch_vcard splices the vCard 4 writer output (PROP-ID lib:1157, PREF lib:1056, lower-case TYPE) into a 3.0 card (lib:1647-1652)';
-my $LABEL   = 'X-ABLabel only written for emails and phones (_add_label: lib:1161,1190); patching a property drops the labels of its other values';
 
 # a map of objects as a sorted list, to compare without the ids
 sub by_value {
@@ -106,12 +102,9 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
     return 0;
   };
 
-  {
-    local $TODO = $REWRITE;
-    is_deeply([grep { !$is_email->($_) } lines($patched)],
-              [grep { !$is_email->($_) } lines($raw)],
-              'Apple: every other line is byte-identical and in the same order');
-  }
+  is_deeply([grep { !$is_email->($_) } lines($patched)],
+            [grep { !$is_email->($_) } lines($raw)],
+            'Apple: every other line is byte-identical and in the same order');
 
   # semantically: every other property, with its group, params and value
   my %after = map { $_->{key} => 1 } props($patched);
@@ -135,14 +128,11 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
   }
 
   like($patched, qr/^VERSION:3\.0\r?$/m, 'Apple: still VERSION:3.0');
-  {
-    local $TODO = $V4IN3;
-    my @v4 = grep { /;(?:PROP-ID|PREF)=/i } lines($patched);
-    is_deeply(\@v4, [], 'Apple: no vCard 4 parameters (PROP-ID, PREF) in a 3.0 card');
-    my ($work) = grep { /johnny\@orchard/ } lines($patched);
-    like($work // '', qr/^item2\.EMAIL;type=INTERNET;type=WORK:/,
-         'Apple: the changed email keeps its group and its 3.0 parameters');
-  }
+  my @v4 = grep { /;(?:PROP-ID|PREF)=/i } lines($patched);
+  is_deeply(\@v4, [], 'Apple: no vCard 4 parameters (PROP-ID, PREF) in a 3.0 card');
+  my ($work) = grep { /johnny\@orchard/ } lines($patched);
+  like($work // '', qr/^item2\.EMAIL;type=INTERNET;type=WORK:/,
+       'Apple: the changed email keeps its group and its 3.0 parameters');
 }
 
 # --- A new label must not take a group the original uses ----------------
@@ -184,7 +174,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
     $new->{name}{full} = 'Johnny Q. Appleseed';
     my $reread = vcard_to_jscontact(patch_vcard($raw, $old, $new));
     is($reread->{name}{full}, 'Johnny Q. Appleseed', 'Apple name: FN changed');
-    local $TODO = 'patching name deletes X-PHONETIC-* (lib:1540) and _unconvert_name does not write them (lib:1088-1136)';
     is_deeply($reread->{name}{phoneticComponents}, $old->{name}{phoneticComponents}, 'Apple name: phonetic names kept');
   }
 
@@ -194,7 +183,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
     $new->{links}{$id}{uri} = 'https://orchard.example/people/johnny';
     my $reread = vcard_to_jscontact(patch_vcard($raw, $old, $new));
     my $home = find_id($reread->{links}, uri => 'https://johnny.example/');
-    local $TODO = $LABEL;
     is(($reread->{links}{$home // ''} // {})->{label}, 'HomePage', 'Apple links: untouched URL keeps its label');
   }
 
@@ -203,7 +191,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
     my $bday = find_id($new->{anniversaries}, kind => 'birth');
     $new->{anniversaries}{$bday}{date} = '0000-07-05';
     my $patched = patch_vcard($raw, $old, $new);
-    local $TODO = 'anniversaries are rewritten from the Card: the custom X-ABDATE (kind "started at orchard") becomes ANNIVERSARY (lib:1286) and its X-ABLabel is dropped';
     like($patched, qr/^item\d+\.X-ABDATE[;:].*2019-02-01/mi, 'Apple anniversaries: custom X-ABDATE kept');
   }
 }
@@ -221,7 +208,6 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
   ok((grep { /^JSPROP;JSPTR="example\.com:foo":"bar"$/i } @after), 'Cyrus: JSPROP kept');
   ok((grep { /^GENDER:F$/ } @after), 'Cyrus: GENDER kept');
   ok((grep { /^EMAIL;.*PROP-ID=e1.*:jane\@new-work\.example$/ } @after), 'Cyrus: patched email keeps its PROP-ID');
-  local $TODO = $REWRITE;
   is_deeply([grep { !/^EMAIL[;:]/ } @after], [grep { !/^EMAIL[;:]/ } lines($raw)],
             'Cyrus: every other line is byte-identical and in the same order');
 }
@@ -237,11 +223,9 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
     my ($id) = keys %{$new->{emails}};
     $new->{emails}{$id}{address} = $addr;
     my $patched = patch_vcard($raw, $old, $new);
-    local $TODO = 'patch_vcard splices character strings from the Card into the byte strings Text::VCardFast parsed (lib:1647-1652): a value below U+0100 comes out as a Latin-1 byte, one above upgrades the string and the original UTF-8 is then double-encoded';
     my $bytes = utf8::is_utf8($patched) ? undef : $patched;
     ok(defined $bytes && eval { Encode::decode('UTF-8', my $copy = $bytes, Encode::FB_CROAK); 1 },
        "UTF-8: patching in $what gives a vCard of UTF-8 bytes");
-    local $TODO = undef if $addr !~ /[^\x00-\xff]/;
     like(Encode::decode('UTF-8', $bytes // ''), qr/^FN:Caf\x{e9} M\x{fc}ller GmbH\r?$/m, "UTF-8: after patching in $what, the untouched FN still reads as UTF-8");
   }
 }
@@ -259,6 +243,110 @@ for my $file (sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf") {
   unlike($patched, qr/^MEMBER:/m, 'Apple group: no vCard 4 MEMBER');
   like($patched, qr/^X-ADDRESSBOOKSERVER-KIND:group\r?$/m, 'Apple group: kind untouched');
   is(scalar keys %{vcard_to_jscontact($patched)->{members}}, 4, 'Apple group: four members');
+}
+
+# --- Untouched lines keep their folding and line endings ------------------
+
+{
+  my $raw = slurp('apple-ios-person.vcf');
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  $new->{name}{full} = 'Johnny Appleseed';
+  my $patched = patch_vcard($raw, $old, $new);
+  my ($photo) = $raw =~ /^(PHOTO;.*?\n(?: .*?\n)*)/m;
+  ok($photo && index($patched, $photo) >= 0, 'Apple: the folded PHOTO keeps its folding');
+  (my $crlf = $raw) =~ s/\r?\n/\r\n/g;
+  my $p2 = patch_vcard($crlf, vcard_to_jscontact($crlf), $new);
+  unlike($p2, qr/(?<!\r)\n/, 'CRLF original: every line, patched or not, ends in CRLF');
+  like($p2, qr/^FN:Johnny Appleseed\r$/m, 'CRLF original: patched FN');
+}
+
+# --- vCard 3: what is patched in is vCard 3 -------------------------------
+
+{
+  my $raw = slurp('apple-ios-person.vcf');
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  $new->{emails}{added} = { '@type' => 'EmailAddress', address => 'new@orchard.example',
+                            contexts => { work => JSON::true }, pref => 1, label => 'Orchard' };
+  my ($m) = keys %{$new->{media}};
+  $new->{media}{$m}{uri} = 'data:image/jpeg;base64,/9j/4AAQ';
+  my ($us) = grep { $new->{addresses}{$_}{countryCode} eq 'us' } keys %{$new->{addresses}};
+  $new->{addresses}{$us}{countryCode} = 'ca';
+  my $patched = patch_vcard($raw, $old, $new);
+  my @l = lines($patched);
+  my ($email) = grep { /new\@orchard/ } @l;
+  like($email // '', qr/^(item\d+)\.EMAIL;TYPE=WORK;TYPE=PREF:new\@orchard\.example$/,
+       'v3: a new email has TYPE=pref, no PROP-ID or PREF, and a new group');
+  my ($g) = ($email // '') =~ /^(item\d+)\./;
+  ok($g && !grep({ /^\Q$g\E\./ } lines($raw)), 'v3: the new group is not one the original uses');
+  ok((grep { /^\Q$g\E\.X-ABLabel:Orchard$/ } @l), 'v3: the label is in that group');
+  ok((grep { $_ eq 'PHOTO;ENCODING=b;TYPE=JPEG:/9j/4AAQ' } @l), 'v3: an inline photo is ENCODING=b with the format as TYPE');
+  ok((grep { $_ eq 'item5.X-ABADR:ca' } @l), 'v3: the Apple country code line is updated');
+  ok((grep { /^item5\.ADR;type=HOME;type=pref:/ } @l), 'v3: and the address line itself is untouched');
+  my $reread = vcard_to_jscontact($patched);
+  # (by value: without PROP-IDs, the new email moves the later ids on)
+  ok((grep { ($_->{countryCode} // '') eq 'ca' } values %{$reread->{addresses}}), 'v3: the country code reads back');
+  my ($back) = grep { $_->{address} eq 'new@orchard.example' } values %{$reread->{emails}};
+  is_deeply([ @{$back // {}}{qw(label pref)} ], ['Orchard', 1], 'v3: the new email reads back with its label and pref');
+}
+
+# --- Removing an entry removes its group -----------------------------------
+
+{
+  my $raw = slurp('apple-ios-person.vcf');
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  my ($au) = grep { $new->{addresses}{$_}{countryCode} eq 'au' } keys %{$new->{addresses}};
+  delete $new->{addresses}{$au};
+  my ($icloud) = grep { $new->{emails}{$_}{address} eq 'jq@icloud.example' } keys %{$new->{emails}};
+  delete $new->{emails}{$icloud};
+  my @l = lines(patch_vcard($raw, $old, $new));
+  is_deeply([ grep { /^item[36]\./ } @l ], [], 'a removed entry takes its label and X-ABADR with it');
+  is(scalar(@l), scalar(lines($raw)) - 4, 'and nothing else');
+}
+
+# --- Apple relations live in the label -----------------------------------
+
+{
+  my $raw = slurp('apple-ios-person.vcf');
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  $new->{relatedTo}{'Granny Smith'}{relation} = { friend => JSON::true };
+  my @l = lines(patch_vcard($raw, $old, $new));
+  ok((grep { $_ eq 'item12.X-ABRELATEDNAMES:Granny Smith' } @l), 'relation change: X-ABRELATEDNAMES untouched');
+  ok((grep { $_ eq 'item12.X-ABLabel:_$!<Friend>!$_' } @l), 'relation change: written as the X-ABLabel');
+}
+
+# --- A vCard 4 property keeps its unknown parameters ------------------------
+
+{
+  my $raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:A\r\n"
+          . "EMAIL;PROP-ID=e1;X-VENDOR=\"keep, me\";TYPE=work,x-custom;PREF=1:a\@example.com\r\n"
+          . "TEL;PROP-ID=t1:+1 555\r\nEND:VCARD\r\n";
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  $new->{emails}{e1}{address} = 'b@example.com';
+  $new->{emails}{e1}{contexts} = { private => JSON::true };
+  delete $new->{emails}{e1}{pref};
+  is(patch_vcard($raw, $old, $new),
+     "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:A\r\n"
+   . "EMAIL;PROP-ID=e1;X-VENDOR=\"keep, me\";TYPE=x-custom;TYPE=home:b\@example.com\r\n"
+   . "TEL;PROP-ID=t1:+1 555\r\nEND:VCARD\r\n",
+     'v4: unknown parameters and TYPE values kept, known ones rewritten');
+}
+
+# --- Characters in, characters out ---------------------------------------
+
+{
+  my $raw = Encode::decode('UTF-8', slurp('apple-company.vcf'));
+  my $old = vcard_to_jscontact($raw);
+  my $new = dclone($old);
+  $new->{name}{full} = "Caf\x{e9} M\x{fc}ller AG";
+  my $patched = patch_vcard($raw, $old, $new);
+  ok(utf8::is_utf8($patched), 'an original given as characters is patched as characters');
+  like($patched, qr/^FN:Caf\x{e9} M\x{fc}ller AG$/m, 'with the new FN');
+  like($patched, qr/^ORG:Caf\x{e9} M\x{fc}ller GmbH;K\x{fc}che$/m, 'and the untouched ORG');
 }
 
 done_testing;
