@@ -5,7 +5,7 @@ use warnings;
 
 package Text::JSContact;
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 # vCard <=> JSContact (RFC 9553) conversion, writing JSContact version 2.0
 # (RFC 9982); follows RFC 9555 for vCard mapping and RFC 9554 for extensions

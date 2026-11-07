@@ -1,6 +1,6 @@
 Revision history for Perl extension Text::JSContact
 
-0.06  unreleased
+0.06  2026-11-07
 	- writing is deterministic: the same Card gives the same bytes in
 	  every process.  Text::VCardFast's hash2vcard wrote parameters in
 	  Perl's hash order, so every save of an unchanged contact had a new
