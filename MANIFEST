@@ -13,3 +13,14 @@ t/patch.t
 t/rfc9555.t
 t/uri-values.t
 t/rfc9982.t
+t/roundtrip-vcard.t
+t/data/vcard/apple-company.vcf
+t/data/vcard/apple-group.vcf
+t/data/vcard/apple-ios-person.vcf
+t/data/vcard/cyrus-carddav-v4.vcf
+t/data/vcard/google-export.vcf
+t/data/vcard/rfc6350-altid.vcf
+t/data/vcard/rfc6350-s8.vcf
+t/data/vcard/rfc9555-examples.vcf
+t/data/vcard/rfc9555-group.vcf
+t/data/vcard/rfc9555-phonetic.vcf
