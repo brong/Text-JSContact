@@ -96,12 +96,6 @@ my %TODO_PROP = (
   'rfc9555-examples.vcf kind'            => $KIND,
 );
 
-# files whose properties carry two or more parameters, so whose written form
-# changes with Perl's hash order
-my $NONDET = 'Text::VCardFast writes params in hash order (`each %{$_->{params}}`), and jscontact_to_vcard hands it params as a hash (lib:1027-1038)';
-my %TODO_DET = map { ($_ => 1) } qw(apple-company.vcf apple-ios-person.vcf cyrus-carddav-v4.vcf
-  google-export.vcf rfc6350-s8.vcf rfc9555-examples.vcf);
-
 my @files = sort map { s{^\Q$DIR\E/}{}r } glob "$DIR/*.vcf";
 ok(@files >= 10, 'corpus has at least ten vCards');
 
@@ -146,7 +140,6 @@ for my $file (@files) {
   # writing the same Card twice gives the same bytes (a CardDAV ETag, or a
   # diff of two versions, depends on it)
   {
-    local $TODO = $TODO_DET{$file} ? $NONDET : undef;
     my %seen;
     $seen{jscontact_to_vcard($card)}++ for 1..5;
     is(scalar(keys %seen), 1, "$file: writing is deterministic");

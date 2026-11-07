@@ -34,3 +34,4 @@ t/data/jscontact/rfc9553-dates.json
 t/data/jscontact/rfc9553-only.json
 t/data/jscontact/utf8.json
 t/patch-minimal.t
+t/deterministic.t

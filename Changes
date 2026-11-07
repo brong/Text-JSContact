@@ -1,5 +1,15 @@
 Revision history for Perl extension Text::JSContact
 
+0.06  unreleased
+	- writing is deterministic: the same Card gives the same bytes in
+	  every process.  Text::VCardFast's hash2vcard wrote parameters in
+	  Perl's hash order, so every save of an unchanged contact had a new
+	  CardDAV ETag.  The module now writes content lines itself, with
+	  parameters in a fixed order (PROP-ID, VALUE, TYPE, PREF, then by
+	  name), folded at 75 octets without splitting a character or an
+	  escape; Text::VCardFast is still the parser
+	- add t/deterministic.t
+
 0.05  2026-11-07
 	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes
 	  version "2.0", and a vCard without UID gives a Card without uid

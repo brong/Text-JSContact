@@ -10,7 +10,7 @@ our $VERSION = '0.05';
 # vCard <=> JSContact (RFC 9553) conversion, writing JSContact version 2.0
 # (RFC 9982); follows RFC 9555 for vCard mapping and RFC 9554 for extensions
 
-use Text::VCardFast qw(vcard2hash hash2vcard);
+use Text::VCardFast qw(vcard2hash);
 use Encode qw(decode_utf8 encode_utf8);
 use MIME::Base64 qw(decode_base64);
 use JSON;
@@ -1652,32 +1652,166 @@ sub patch_vcard {
   return _hash2vcard($vcard);
 }
 
-# Text::VCardFast escapes LF in values (\n) and parameters (^n), but
-# writes every other control character raw, so a CR from the card data
-# could end the content line early and forge extra properties.  vCard
-# allows no control characters but HTAB, so turn CR into LF and drop
-# the rest.
+# A vCard as Text::VCardFast parses it, written again
 sub _hash2vcard {
   my ($vcard) = @_;
+  return _write_vcard([ map { @$_ } @{$vcard->{properties}}{sort keys %{$vcard->{properties}}} ]);
+}
 
-  for my $prop (map { @$_ } values %{$vcard->{properties}}) {
-    $prop->{value} = _clean_vcard_text($prop->{value}) if exists $prop->{value};
-    $prop->{values} = _clean_vcard_text($prop->{values}) if $prop->{values};
-    my $params = $prop->{params} // {};
-    $params->{$_} = _clean_vcard_text($params->{$_}) for keys %$params;
-    _write_uri_raw($prop);
+###############################################################################
+# WRITING: content lines, byte for byte the same for the same input
+###############################################################################
+
+# Text::VCardFast's hash2vcard writes the parameters of a property in
+# Perl's hash order, so the same Card gave different bytes on every run
+# (and a CardDAV server a new ETag for every unchanged save).  The writer
+# here keeps its property order but orders everything it writes.
+
+# properties in this order first (Text::VCardFast's), then by name
+my @PROP_ORDER = qw(version fn n nickname lang gender org title role bday
+                    anniversary email tel adr url impp);
+my %PROP_ORDER = map { $PROP_ORDER[$_] => $_ + 1 } 0..$#PROP_ORDER;
+
+# parameters in this order first, then by name
+my @PARAM_ORDER = qw(prop-id value type pref);
+my %PARAM_ORDER = map { $PARAM_ORDER[$_] => $_ + 1 } 0..$#PARAM_ORDER;
+
+# A whole vCard from a list of properties; items of one group are written
+# together, after the first of them
+sub _write_vcard {
+  my ($props, $eol) = @_;
+  $eol //= "\n";
+
+  my %by_name;
+  push @{$by_name{lc $_->{name}}}, $_ for @$props;
+  my @names = sort {
+    ($PROP_ORDER{$a} // 1000) <=> ($PROP_ORDER{$b} // 1000) || $a cmp $b
+  } keys %by_name;
+
+  my %groups;
+  for my $prop (@$props) {
+    push @{$groups{lc $prop->{group}}}, $prop if defined $prop->{group} && $prop->{group} ne '';
   }
 
-  return hash2vcard({ objects => [$vcard] });
+  my (%done, @out);
+  for my $name (@names) {
+    for my $prop (@{$by_name{$name}}) {
+      next if $done{$prop}++;
+      push @out, $prop;
+      if (defined $prop->{group} && $prop->{group} ne '') {
+        push @out, grep { !$done{$_}++ } @{$groups{lc $prop->{group}}};
+      }
+    }
+  }
+
+  return join '', "BEGIN:VCARD$eol", (map { _fold(_prop_line($_), $eol) } @out), "END:VCARD$eol";
+}
+
+# One property as an unfolded content line, cleaned of control characters
+sub _prop_line {
+  my ($prop) = @_;
+  my $line = '';
+  $line .= "$prop->{group}." if defined $prop->{group} && $prop->{group} ne '';
+  $line .= uc $prop->{name};
+  $line .= _params_text($prop->{params});
+  return $line . ':' . _value_text($prop);
+}
+
+sub _params_text {
+  my ($params) = @_;
+  return '' unless $params && %$params;
+  my $text = '';
+  my @names = sort {
+    ($PARAM_ORDER{$a} // 1000) <=> ($PARAM_ORDER{$b} // 1000) || $a cmp $b
+  } keys %$params;
+  for my $name (@names) {
+    my $vals = $params->{$name};
+    for my $val (ref $vals eq 'ARRAY' ? @$vals : ($vals)) {
+      next unless defined $val;
+      $text .= ';' . uc($name) . '=' . _param_value($val);
+    }
+  }
+  return $text;
+}
+
+# RFC 6868 caret encoding; quoted when it holds a separator or space
+sub _param_value {
+  my ($val) = @_;
+  $val = _clean_vcard_text($val);
+  $val =~ s/([\n^"])/$1 eq "\n" ? '^n' : $1 eq '^' ? '^^' : "^'"/ge;
+  $val = qq{"$val"} if $val =~ /[;:,\s]/;
+  return $val;
+}
+
+# RFC 6350 S3.4: TEXT escapes BACKSLASH, COMMA, SEMICOLON and NEWLINE
+sub _escape_text {
+  my ($val) = @_;
+  die "Text::JSContact: a vCard value must be a string, not $val\n" if ref $val;
+  $val = _clean_vcard_text($val // '');
+  $val =~ s/([\\,;])/\\$1/g;
+  $val =~ s/\n/\\n/g;
+  return $val;
+}
+
+# A structured value is a list of components, each a string or a list
+# of strings (written comma-separated)
+sub _value_text {
+  my ($prop) = @_;
+  if (my $values = $prop->{values}) {
+    return join ';', map {
+      ref $_ eq 'ARRAY' ? join(',', map { _escape_text($_) } @$_) : _escape_text($_)
+    } @$values;
+  }
+  return _uri_text($prop->{value}) if _is_uri_value($prop);
+  return $prop->{raw_value} if defined $prop->{raw_value};
+  return _escape_text($prop->{value});
+}
+
+# Fold a content line at 75 octets (RFC 6350 S3.2), never inside a
+# character or between a backslash and the character it escapes
+sub _fold {
+  my ($line, $eol) = @_;
+  my @out;
+  if ($line !~ /[^\x00-\x7f]/) {
+    # one character, one octet
+    my $pos = 0;
+    while ($pos < length $line) {
+      my $max = @out ? 74 : 75;
+      my $chunk = substr($line, $pos, $max);
+      # an odd run of backslashes at the end splits an escape
+      chop $chunk if length $chunk == $max && $pos + $max < length $line
+                  && $chunk =~ /(?<!\\)(?:\\\\)*\\\z/;
+      push @out, $chunk;
+      $pos += length $chunk;
+    }
+  }
+  else {
+    my $cur = '';
+    my $len = 0;
+    for my $ch ($line =~ /(\\.|.)/sg) {
+      my $l = $ch =~ /[^\x00-\x7f]/ ? length(encode_utf8($ch)) : length $ch;
+      my $max = @out ? 74 : 75;
+      if ($len + $l > $max && $len) {
+        push @out, $cur;
+        $cur = '';
+        $len = 0;
+      }
+      $cur .= $ch;
+      $len += $l;
+    }
+    push @out, $cur;
+  }
+  push @out, '' unless @out;
+  return join("$eol ", @out) . $eol;
 }
 
 # RFC 6350 S3.4 escapes COMMA, SEMICOLON, BACKSLASH and NEWLINE in TEXT
-# values only; a URI value is written as it is.  Text::VCardFast escapes
-# every value, which turns "data:image/png;base64,..." into
-# "data:image/png\;base64\,...", no longer a URI (Cyrus then stores it
-# as TEXT with a nonsense media type).  These are the properties whose
-# default value type is URI (RFC 6350 S6, RFC 6715, RFC 8605, RFC 9554),
-# plus Apple's member property.
+# values only; a URI value is written as it is.  Escaping every value
+# turns "data:image/png;base64,..." into "data:image/png\;base64\,...",
+# no longer a URI (Cyrus then stores it as TEXT with a nonsense media
+# type).  These are the properties whose default value type is URI
+# (RFC 6350 S6, RFC 6715, RFC 8605, RFC 9554), plus Apple's member
+# property.
 my %URI_DEFAULT = map { $_ => 1 } qw(
   source photo impp geo logo member sound uid url key fburl caladruri
   caluri related org-directory contact-uri socialprofile
@@ -1686,7 +1820,7 @@ my %URI_DEFAULT = map { $_ => 1 } qw(
 
 sub _is_uri_value {
   my ($prop) = @_;
-  return 0 if $prop->{binary} || exists $prop->{values};
+  return 0 if exists $prop->{values};
   my $val = $prop->{value};
   return 0 if !defined $val || ref $val;
   # only something that is a URI: a bare IMPP username, a vCard 3 GEO
@@ -1699,20 +1833,20 @@ sub _is_uri_value {
   return $URI_DEFAULT{lc $prop->{name}} ? 1 : 0;
 }
 
-sub _write_uri_raw {
-  my ($prop) = @_;
-  return unless _is_uri_value($prop);
-  my $val = $prop->{value};
+sub _uri_text {
+  my ($val) = @_;
+  $val = _clean_vcard_text($val);
   # A URI has neither, and written raw a LF would end the content line,
   # so percent-encode them; it also means a reader's TEXT unescaping
   # (Text::VCardFast's applies to every value) leaves the URI alone.
   $val =~ s/\\/%5C/g;
   $val =~ s/\n/%0A/g;
-  # Text::VCardFast writes proto_strip ahead of the escaped value as is
-  $prop->{proto_strip} = $val;
-  $prop->{value} = '';
+  return $val;
 }
 
+# A CR from the card data could end the content line early and forge
+# extra properties.  vCard allows no control characters but HTAB, so turn
+# CR into LF (escaped as \n, or ^n in a parameter) and drop the rest.
 sub _clean_vcard_text {
   my ($val) = @_;
   return [ map { _clean_vcard_text($_) } @$val ] if ref $val eq 'ARRAY';
