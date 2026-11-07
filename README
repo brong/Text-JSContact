@@ -4,7 +4,8 @@ DESCRIPTION
 
 Text::JSContact provides bidirectional conversion between vCard (RFC 6350)
 and JSContact (RFC 9553), following the mapping rules in RFC 9555 and the
-extensions in RFC 9554.
+extensions in RFC 9554.  Cards are JSContact version 2.0 (RFC 9982), where
+uid is optional: a vCard without UID gives a Card without uid.
 
 The module handles both standard vCard properties and widely-used vendor
 extensions, particularly those from Apple's Contacts/AddressBook framework.
@@ -13,7 +14,8 @@ FUNCTIONS
 
   vcard_to_jscontact($vcard_string)
 
-    Parse a vCard string and return a JSContact Card hashref.
+    Parse a vCard string and return a JSContact Card hashref (version
+    "2.0"; no uid unless the vCard has a UID, per RFC 9982).
 
   jscontact_to_vcard($card_hashref)
 

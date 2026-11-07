@@ -7,8 +7,8 @@ package Text::JSContact;
 
 our $VERSION = '0.04';
 
-# vCard <=> JSContact (RFC 9553) conversion
-# Follows RFC 9555 for vCard mapping and RFC 9554 for extensions
+# vCard <=> JSContact (RFC 9553) conversion, writing JSContact version 2.0
+# (RFC 9982); follows RFC 9555 for vCard mapping and RFC 9554 for extensions
 
 use Text::VCardFast qw(vcard2hash hash2vcard);
 use Encode qw(decode_utf8 encode_utf8);
@@ -103,18 +103,6 @@ sub _to_utc_datetime {
   return $val;
 }
 
-sub _generate_uid {
-  my @hex = ('0'..'9', 'a'..'f');
-  my $uuid = '';
-  for my $i (1..32) {
-    $uuid .= $hex[int(rand(16))];
-    $uuid .= '-' if $i == 8 || $i == 12 || $i == 16 || $i == 20;
-  }
-  substr($uuid, 14, 1) = '4';
-  substr($uuid, 19, 1) = $hex[8 + int(rand(4))];
-  return "urn:uuid:$uuid";
-}
-
 sub _set_if {
   my ($hash, $key, $val, $transform) = @_;
   return unless defined $val && $val ne '';
@@ -192,11 +180,13 @@ sub vcard_to_jscontact {
 
   my $card = {
     '@type' => 'Card',
-    version => '1.0',
+    version => '2.0',
   };
 
-  # UID (required)
-  $card->{uid} = _first_value($props, 'uid') // _generate_uid();
+  # UID: optional since JSContact 2.0 (RFC 9982), which forbids making one
+  # up for a vCard that has none -- a protocol that needs a uid (CardDAV,
+  # JMAP Contacts) assigns it itself
+  _set_if($card, 'uid', _first_value($props, 'uid'));
 
   # Simple scalar properties
   _set_if($card, 'kind',     _first_value($props, 'kind')

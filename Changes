@@ -1,5 +1,16 @@
 Revision history for Perl extension Text::JSContact
 
+0.05  unreleased
+	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes
+	  version "2.0", and a vCard without UID gives a Card without uid
+	  instead of one with a random uuid (which changed on every
+	  conversion, so nothing could refer to it); jscontact_to_vcard
+	  already wrote no UID for a Card without uid
+	- write URI values (PHOTO, MEMBER, URL, ...) unescaped
+	- read a vCard 3 inline photo once, including one whose TYPE is a list;
+	  skip a Media with no uri instead of writing an empty PHOTO
+	- add t/rfc9982.t
+
 0.04  2026-10-22
 	- security: strip control characters from vCard output; Text::VCardFast
 	  escapes LF but writes a CR raw, so a CR in any card field could end
