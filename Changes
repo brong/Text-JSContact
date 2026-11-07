@@ -1,6 +1,6 @@
 Revision history for Perl extension Text::JSContact
 
-0.05  unreleased
+0.05  2026-11-07
 	- JSContact version 2.0 (RFC 9982): vcard_to_jscontact writes
 	  version "2.0", and a vCard without UID gives a Card without uid
 	  instead of one with a random uuid (which changed on every
