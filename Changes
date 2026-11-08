@@ -4,6 +4,9 @@ Revision history for Perl extension Text::JSContact
 	- security: a vCard nested more than 16 deep is refused before
 	  Text::VCardFast sees it (its parser recurses in C once per BEGIN:
 	  tens of thousands of levels killed the process)
+	- a backslash in a parameter value is dropped: RFC 6350 gives it no
+	  meaning there, but Text::VCardFast reads \; \: \" as escapes, and a
+	  SORT-AS or TZ ending in one made the card unreadable
 	- add t/hostile.t
 
 0.06  2026-11-07

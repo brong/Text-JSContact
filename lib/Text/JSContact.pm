@@ -2469,6 +2469,10 @@ sub _param_order {
 sub _param_value {
   my ($val) = @_;
   $val = _clean_vcard_text($val);
+  # a backslash has no meaning in a parameter (RFC 6350, 6868), but
+  # Text::VCardFast reads \; \: \" as escapes: "a \" swallowed what
+  # followed, and the card no longer parsed
+  $val =~ s/\\//g;
   $val =~ s/([\n^"])/$1 eq "\n" ? '^n' : $1 eq '^' ? '^^' : "^'"/ge;
   $val = qq{"$val"} if $val =~ /[;:,\s]/;
   return $val;
