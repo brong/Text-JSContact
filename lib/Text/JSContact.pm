@@ -1693,10 +1693,14 @@ sub _split_vcard {
   return undef unless $text =~ /\n/;
   my $eol = $text =~ /\r\n/ ? "\r\n" : "\n";
 
+  # one match per logical line (a physical line and its folded
+  # continuations): a split at every newline was most of the time a card
+  # with a large folded PHOTO took
   my @lines;
-  for my $phys (split /(?<=\n)/, $text) {
-    if (@lines && $phys =~ /^[ \t]/) { $lines[-1]{raw} .= $phys }
-    else                             { push @lines, { raw => $phys } }
+  pos($text) = 0;
+  while (pos($text) < length $text) {
+    $text =~ /\G([^\n]*(?:\n|\z)(?:[ \t][^\n]*(?:\n|\z))*)/gc or last;
+    push @lines, { raw => $1 };
   }
 
   my ($depth, $end, %by_name) = (0);
