@@ -1,5 +1,11 @@
 Revision history for Perl extension Text::JSContact
 
+0.07  unreleased
+	- security: a vCard nested more than 16 deep is refused before
+	  Text::VCardFast sees it (its parser recurses in C once per BEGIN:
+	  tens of thousands of levels killed the process)
+	- add t/hostile.t
+
 0.06  2026-11-07
 	- writing is deterministic: the same Card gives the same bytes in
 	  every process.  Text::VCardFast's hash2vcard wrote parameters in

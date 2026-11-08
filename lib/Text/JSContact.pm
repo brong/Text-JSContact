@@ -260,9 +260,24 @@ my @MAP_CONVERTERS = (
 # Read a vCard given as characters.  Returns the Card, the conversion
 # context (whose {sources} maps each Card entry to the vCard properties it
 # was read from) and the parsed properties; nothing if it does not parse.
+# Text::VCardFast recurses once per BEGIN, in C: nesting tens of thousands
+# deep overflows the stack and kills the process (no eval can catch that).
+# A vCard nests at most a level or two (an AGENT); refuse anything deeper.
+our $MAX_NESTING = 16;
+sub _nesting_ok {
+  my ($text) = @_;
+  my $depth = 0;
+  while ($text =~ /^(BEGIN|END)[ \t]*:/mgi) {
+    if (uc $1 eq 'BEGIN') { $depth++; return 0 if $depth > $MAX_NESTING }
+    else { $depth-- if $depth > 0 }
+  }
+  return 1;
+}
+
 sub _read_vcard {
   my ($vcard_string) = @_;
 
+  return unless _nesting_ok($vcard_string // '');
   my $parsed = eval { vcard2hash($vcard_string, multival => [qw(n adr org)]) };
   return unless $parsed && $parsed->{objects} && @{$parsed->{objects}};
 
