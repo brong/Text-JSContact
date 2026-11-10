@@ -36,3 +36,4 @@ t/data/jscontact/utf8.json
 t/patch-minimal.t
 t/deterministic.t
 t/original.t
+t/hostile.t

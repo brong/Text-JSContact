@@ -1,6 +1,6 @@
 Revision history for Perl extension Text::JSContact
 
-0.07  unreleased
+0.07  2026-11-10
 	- security: a vCard nested more than 16 deep is refused before
 	  Text::VCardFast sees it (its parser recurses in C once per BEGIN:
 	  tens of thousands of levels killed the process)
